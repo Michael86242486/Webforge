@@ -312,7 +312,7 @@ router.get("/deploying/:projectId", async (req: Request, res: Response) => {
   } catch (_) {}
 
   res.setHeader("Content-Type", "text/html");
-  res.send(DEPLOYING_HTML(projectId, apiBase, liveUrl));
+  res.send(DEPLOYING_HTML(String(projectId), apiBase, liveUrl));
 });
 
 export default router;

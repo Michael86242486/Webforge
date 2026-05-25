@@ -49,7 +49,7 @@ export function broadcastRedirect(projectId: string, url: string): void {
 }
 
 router.get("/projects/:projectId/stream", (req: Request, res: Response) => {
-  const { projectId } = req.params;
+  const projectId = String(req.params.projectId);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -93,7 +93,7 @@ router.get("/projects/:projectId/stream", (req: Request, res: Response) => {
 });
 
 router.post("/projects/:projectId/files", async (req: Request, res: Response) => {
-  const { projectId } = req.params;
+  const projectId = String(req.params.projectId);
   const { path: filePath, content } = req.body as { path: string; content: string };
 
   if (!filePath || content === undefined) {

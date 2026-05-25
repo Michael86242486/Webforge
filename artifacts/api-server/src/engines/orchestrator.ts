@@ -1,6 +1,7 @@
 import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import fsSync from "fs";
 import path from "path";
 import { logger } from "../lib/logger.js";
 import { recordFileDiff } from "../utils/telemetry.js";
@@ -8,6 +9,11 @@ import { recordFileDiff } from "../utils/telemetry.js";
 const execAsync = promisify(exec);
 
 export const PROJECTS_BASE_DIR = process.env.PROJECTS_BASE_DIR ?? "/home/runner/workspace/user-projects";
+const PORT_RANGE_START = parseInt(process.env.PORT_RANGE_START ?? "5100");
+
+export function assignProjectPort(projectId: number): number {
+  return PORT_RANGE_START + (projectId % 900);
+}
 
 export async function ensureProjectDir(projectId: number, userId: number): Promise<string> {
   const dir = path.join(PROJECTS_BASE_DIR, `user-${userId}`, `project-${projectId}`);
@@ -58,11 +64,12 @@ export async function listProjectFiles(dir: string): Promise<string[]> {
 
 export async function runTerminalCommand(
   command: string,
-  cwd: string
+  cwd: string,
+  timeoutMs = 120_000,
 ): Promise<{ stdout: string; stderr: string }> {
   logger.info({ command, cwd }, "Running terminal command");
   try {
-    const result = await execAsync(command, { cwd, timeout: 120_000 });
+    const result = await execAsync(command, { cwd, timeout: timeoutMs });
     return { stdout: result.stdout, stderr: result.stderr };
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
@@ -88,6 +95,74 @@ export function spawnBotProcess(
   });
   child.unref();
   return { pid: child.pid };
+}
+
+export async function detectEntryPoint(workDir: string): Promise<string> {
+  try {
+    const raw = await fs.readFile(path.join(workDir, "package.json"), "utf8");
+    const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; main?: string; type?: string };
+
+    if (pkg.scripts?.start) {
+      const nodeMatch = pkg.scripts.start.match(/node\s+([\w./src-]+\.m?js)/);
+      if (nodeMatch) return nodeMatch[1];
+    }
+    if (pkg.main) return pkg.main;
+  } catch (_) {}
+
+  const candidates = [
+    "src/index.js", "src/server.js", "src/app.js",
+    "index.js", "server.js", "app.js",
+    "src/index.mjs", "index.mjs",
+  ];
+  for (const p of candidates) {
+    try { await fs.access(path.join(workDir, p)); return p; } catch (_) {}
+  }
+  return "index.js";
+}
+
+export async function spawnProjectApp(
+  workDir: string,
+  projectId: number,
+  port: number,
+): Promise<{ pid: number | undefined }> {
+  const entry = await detectEntryPoint(workDir);
+
+  const stdoutLog = path.join(workDir, "app.stdout.log");
+  const stderrLog = path.join(workDir, "app.stderr.log");
+
+  const outFd = fsSync.openSync(stdoutLog, "a");
+  const errFd = fsSync.openSync(stderrLog, "a");
+
+  const child = spawn("node", [entry], {
+    cwd: workDir,
+    env: { ...process.env, PORT: String(port), NODE_ENV: "production" },
+    detached: true,
+    stdio: ["ignore", outFd, errFd],
+  });
+  child.unref();
+
+  logger.info({ projectId, port, entry, pid: child.pid }, "Project app spawned");
+  return { pid: child.pid };
+}
+
+export async function pollAppHealth(
+  port: number,
+  maxMs = 90_000,
+  intervalMs = 2_500,
+): Promise<boolean> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 1500);
+      await fetch(`http://localhost:${port}/`, { signal: ctrl.signal });
+      clearTimeout(timer);
+      return true;
+    } catch (_) {
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
+  }
+  return false;
 }
 
 export async function scaffoldBotProject(
@@ -156,7 +231,6 @@ export async function processImageWithSharp(
     type: "resize" | "crop" | "filter" | "overlay";
     width?: number;
     height?: number;
-    text?: string;
     grayscale?: boolean;
   },
   outputPath: string
@@ -173,8 +247,6 @@ export async function processImageWithSharp(
       break;
     case "filter":
       if (operation.grayscale) pipeline = pipeline.grayscale();
-      break;
-    case "overlay":
       break;
   }
 
@@ -203,24 +275,27 @@ export async function planningMode(
 
 User request: "${userPrompt}"
 
-Output ONLY valid JSON in this exact format (no markdown, no explanation outside JSON):
+Output ONLY valid JSON (no markdown fences, no explanation outside the JSON object):
 {
   "techStack": "e.g. Node.js + Express + SQLite",
   "summary": "One sentence describing what this project does",
   "files": [
-    { "path": "package.json", "description": "Node.js project manifest with dependencies" },
-    { "path": "src/index.ts", "description": "Express server entry point" },
-    { "path": "src/routes/api.ts", "description": "REST API route handlers" }
+    { "path": "package.json", "description": "Node.js project manifest" },
+    { "path": "src/index.js", "description": "Express server entry point" }
   ]
 }
 
-Be specific and complete. Include every file needed for a working production app: config, source, assets, and documentation. Aim for 8-20 files for a typical project.`;
+IMPORTANT:
+- Use plain JavaScript (NOT TypeScript) for all server/backend files
+- The main entry must be runnable with: node <entry>
+- Include process.env.PORT usage in the server file
+- Aim for 8-15 files for a complete working app`;
 
   const result = await routeTaskFn("planning", planPrompt, tier, telegramId);
 
   try {
     const jsonMatch = result.content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON found in planning response");
+    if (!jsonMatch) throw new Error("No JSON found");
     const parsed = JSON.parse(jsonMatch[0]) as { techStack?: string; summary?: string; files?: FilePlan[] };
     return {
       manifest: parsed.files ?? [],
@@ -228,16 +303,17 @@ Be specific and complete. Include every file needed for a working production app
       summary: parsed.summary ?? "Custom application",
     };
   } catch (err) {
-    logger.warn({ err }, "planningMode JSON parse failed, using fallback manifest");
+    logger.warn({ err }, "planningMode JSON parse failed, using fallback");
     return {
       manifest: [
         { path: "package.json", description: "Project manifest" },
-        { path: "src/index.ts", description: "Main entry point" },
-        { path: "src/app.ts", description: "Application logic" },
-        { path: "public/index.html", description: "Frontend entry" },
+        { path: "src/index.js", description: "Express server entry point" },
+        { path: "src/routes/api.js", description: "API routes" },
+        { path: "public/index.html", description: "Frontend HTML" },
+        { path: "public/style.css", description: "Frontend styles" },
         { path: "README.md", description: "Documentation" },
       ],
-      techStack: "fullstack",
+      techStack: "Node.js + Express",
       summary: userPrompt.slice(0, 80),
     };
   }
@@ -262,7 +338,7 @@ export function parseFilesFromAIOutput(output: string): ParsedFile[] {
 
   if (files.length > 0) return files;
 
-  const codeBlockRegex = /```[\w.]*\n(?:\/\/\s*FILE:\s*(.+?)\n)?([\s\S]*?)```/g;
+  const codeBlockRegex = /```[\w.]*\n(?:(?:\/\/|#)\s*FILE:\s*(.+?)\n)?([\s\S]*?)```/g;
   while ((match = codeBlockRegex.exec(output)) !== null) {
     const filePath = match[1]?.trim();
     const content = match[2].trim();
@@ -283,7 +359,7 @@ export async function buildProjectFiles(
 
   const toWrite: ParsedFile[] = parsed.length > 0 ? parsed : manifest.map((f, i) => ({
     path: f.path,
-    content: `// ${f.description}\n// File ${i + 1} of ${manifest.length} — generated by WebForge`,
+    content: generateFallbackFile(f, i, manifest.length),
   }));
 
   let written = 0;
@@ -297,4 +373,39 @@ export async function buildProjectFiles(
   }
 
   return written;
+}
+
+function generateFallbackFile(f: FilePlan, index: number, total: number): string {
+  if (f.path === "package.json") {
+    return JSON.stringify({
+      name: "webforge-app",
+      version: "1.0.0",
+      scripts: { start: "node src/index.js" },
+      dependencies: { express: "^4.18.2" },
+    }, null, 2);
+  }
+  if (f.path.endsWith("index.js") || f.path.endsWith("server.js")) {
+    return `const express = require('express');
+const path = require('path');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.static(path.join(__dirname, '../public')));
+app.get('/api/health', (_req, res) => res.json({ status: 'ok', project: 'webforge-app' }));
+app.listen(PORT, () => console.log('Server running on port ' + PORT));
+`;
+  }
+  if (f.path.endsWith(".html")) {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>WebForge App</title>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div id="app"><h1>WebForge App</h1><p>${f.description}</p></div>
+<script src="app.js"></script>
+</body></html>`;
+  }
+  return `// ${f.description}\n// File ${index + 1} of ${total} — generated by WebForge\n`;
 }

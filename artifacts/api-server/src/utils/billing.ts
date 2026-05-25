@@ -1,5 +1,5 @@
 import { db, usersTable, projectsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 export type Tier = "starter" | "pro" | "elite";
 
@@ -75,7 +75,6 @@ export async function checkActionAllowed(telegramId: number): Promise<{
   const tier = (user.tier as Tier) ?? "starter";
   const limits = TIER_LIMITS[tier];
 
-  // Reset daily counter if older than 24h
   const resetTime = user.dailyActionsReset;
   if (resetTime && Date.now() - resetTime.getTime() > 24 * 60 * 60 * 1000) {
     await db.update(usersTable)
@@ -96,7 +95,7 @@ export async function checkActionAllowed(telegramId: number): Promise<{
 
 export async function incrementAction(telegramId: number): Promise<void> {
   await db.update(usersTable)
-    .set({ dailyActionsCounter: (await db.select().from(usersTable).where(eq(usersTable.telegramId, telegramId)).limit(1))[0]?.dailyActionsCounter ?? 0 + 1 })
+    .set({ dailyActionsCounter: sql`daily_actions_counter + 1` })
     .where(eq(usersTable.telegramId, telegramId));
 }
 

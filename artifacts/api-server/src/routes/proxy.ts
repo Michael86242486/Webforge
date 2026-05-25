@@ -9,19 +9,62 @@ const router = Router();
 
 const proxyCache = new Map<string, ReturnType<typeof createProxyMiddleware>>();
 
+router.get("/projects/:projectId/health", async (req: Request, res: Response) => {
+  const { projectId } = req.params;
+  const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, Number(projectId))).limit(1);
+
+  if (!project?.port) {
+    res.json({ live: false, reason: "no port assigned" });
+    return;
+  }
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2000);
+    const r = await fetch(`http://localhost:${project.port}/`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    res.json({ live: true, port: project.port, status: r.status, url: project.liveUrl });
+  } catch (_) {
+    res.json({ live: false, port: project.port, reason: "not responding" });
+  }
+});
+
 router.use("/preview-proxy/:projectId", async (req: Request, res: Response, next) => {
   const { projectId } = req.params;
 
   const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, Number(projectId))).limit(1);
 
   if (!project?.port) {
-    res.status(503).send(`
-      <html><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;padding:40px">
-        <h2 style="color:#58a6ff">⚡ WebForge Sandbox</h2>
-        <p style="color:#8b949e">Project #${projectId} is not running yet.</p>
-        <p style="margin-top:16px">Use the Telegram bot or workspace to start your app.</p>
-      </body></html>
-    `);
+    res.status(503).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta http-equiv="refresh" content="5"/>
+<title>WebForge — Starting App...</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0a0e14; color: #cdd9e5; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; flex-direction: column; gap: 12px; }
+  .spinner { width: 32px; height: 32px; border: 3px solid #1e2d45; border-top-color: #58a6ff; border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h2 { color: #58a6ff; margin: 0; font-size: 18px; }
+  p { color: #6e7f96; margin: 0; font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="spinner"></div>
+  <h2>Starting your app...</h2>
+  <p>Project #${projectId} is spinning up.<br/>This page will refresh automatically.</p>
+  <script>
+    // Poll until the app is live
+    (function poll() {
+      fetch('/api/projects/${projectId}/health')
+        .then(r => r.json())
+        .then(d => { if (d.live) window.location.reload(); else setTimeout(poll, 2500); })
+        .catch(() => setTimeout(poll, 3000));
+    })();
+  </script>
+</body>
+</html>`);
     return;
   }
 
@@ -34,10 +77,15 @@ router.use("/preview-proxy/:projectId", async (req: Request, res: Response, next
       changeOrigin: true,
       pathRewrite: { [`^/api/preview-proxy/${projectId}`]: "" },
       on: {
-        error: (err, _req, res) => {
-          logger.warn({ err, targetPort }, "Proxy error");
+        error: (_err, _req, res) => {
           if (res && "status" in res) {
-            (res as Response).status(502).send("App not responding");
+            (res as Response).status(502).send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"/><meta http-equiv="refresh" content="3"/>
+<title>Connecting...</title>
+<style>body{font-family:sans-serif;background:#0a0e14;color:#cdd9e5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:10px;}
+.s{width:28px;height:28px;border:3px solid #1e2d45;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}</style>
+</head><body><div class="s"></div><p>Connecting to your app on port ${targetPort}...</p></body></html>`);
           }
         },
       },
@@ -47,5 +95,9 @@ router.use("/preview-proxy/:projectId", async (req: Request, res: Response, next
 
   proxyCache.get(cacheKey)!(req, res, next);
 });
+
+export function invalidateProxyCache(port: number): void {
+  proxyCache.delete(String(port));
+}
 
 export default router;

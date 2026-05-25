@@ -1,18 +1,21 @@
 import TelegramBot from "node-telegram-bot-api";
-import { routeTask, deepBuildLoop, type TaskType } from "../ai/router.js";
+import { routeTask, generateImage, deepBuildLoop, type TaskType } from "../ai/router.js";
 import { getOrCreateUser, checkActionAllowed, incrementAction, checkProjectLimitAllowed, TIER_LIMITS, type Tier } from "../utils/billing.js";
 import { encrypt } from "../utils/crypto.js";
 import { db, usersTable, projectsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import {
   ensureProjectDir, scaffoldBotProject, spawnBotProcess,
-  planningMode, buildProjectFiles,
-  runTerminalCommand,
+  planningMode, buildProjectFiles, runTerminalCommand,
+  spawnProjectApp, pollAppHealth, assignProjectPort,
 } from "../engines/orchestrator.js";
 import {
   broadcastProgress, broadcastRedirect, broadcastStatus, broadcastToProject,
 } from "../routes/stream.js";
 import { logger } from "../lib/logger.js";
+import fs from "fs/promises";
+import path from "path";
+import os from "os";
 
 const TOKEN = process.env.CORE_BOT_TOKEN ?? "";
 
@@ -37,8 +40,7 @@ Your identity is absolute and non-negotiable:
 
 WebForge capabilities:
 • Build full-stack web apps, APIs, and Telegram bots from a single prompt
-• Stream live code to the workspace editor via SSE
-• Generate and edit images (logos, banners, hero assets)
+• Generate images (logos, banners, hero assets, illustrations) on demand
 • Host Telegram bots permanently (Pro/Elite)
 • Inject AI personas into any project via persona.json
 • Clone and extend GitHub repositories (Elite)
@@ -67,9 +69,8 @@ async function isSubscribedToChannel(telegramId: number): Promise<boolean> {
 
 async function sendSubscriptionGate(chatId: number): Promise<void> {
   if (!bot) return;
-  await bot.sendMessage(
-    chatId,
-    `🔒 *Access Required*\n\nTo use WebForge, you must first join our official channel.\n\nJoin here: ${REQUIRED_CHANNEL}\nThen come back and tap *Start* or send any message.\n\nThis gives you access to build plans, deployments, and all WebForge capabilities.`,
+  await bot.sendMessage(chatId,
+    `🔒 *Access Required*\n\nTo use WebForge, first join our official channel.\n\n📢 ${REQUIRED_CHANNEL}\n\nThen tap *I've Joined* below.`,
     {
       parse_mode: "Markdown",
       reply_markup: {
@@ -82,14 +83,31 @@ async function sendSubscriptionGate(chatId: number): Promise<void> {
   );
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Intent Detection ─────────────────────────────────────────────────────────
+
+function isImageIntent(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  return (
+    /^(create|generate|make|draw|design|show)\s+(me\s+)?(an?\s+)?(image|photo|picture|illustration|logo|banner|icon|artwork|visual|portrait|landscape|wallpaper)\b/.test(lower) ||
+    /\b(image|photo|picture|illustration|logo|banner)\s+of\b/.test(lower) ||
+    /^draw\b/.test(lower) ||
+    (/\b(create|generate|make|draw|design)\b/.test(lower) && /\b(image|photo|picture|illustration|artwork|visual|wallpaper|portrait)\b/.test(lower))
+  );
+}
+
+function isBillingIntent(text: string): boolean {
+  return /\b(upgrade|pro\s*plan|elite\s*plan|pricing|subscribe|subscription|payment|pay\s+for|how\s+much|plans?|tier|billing|₦|naira)\b/i.test(text);
+}
+
+function isBuildIntent(text: string): boolean {
+  return /\b(build|create|make|develop|generate|code|write|implement|design|launch|deploy|bot|app|website|api|landing\s*page|clone|scaffold)\b/i.test(text) && text.length > 15;
+}
 
 function detectTaskType(text: string): TaskType {
   const lower = text.toLowerCase();
   if (/plan|architect|design system|spec|blueprint/.test(lower)) return "planning";
   if (/build|create|generate|implement|code|develop|write/.test(lower)) return "coding";
   if (/fix|debug|error|bug|issue|repair/.test(lower)) return "fixing";
-  if (/image|logo|icon|banner|art|visual/.test(lower)) return "image";
   if (/ui|interface|frontend|layout|component/.test(lower)) return "ui";
   return "chat";
 }
@@ -98,119 +116,98 @@ async function sendTyping(chatId: number): Promise<void> {
   try { await bot?.sendChatAction(chatId, "typing"); } catch (_) {}
 }
 
-function isBillingIntent(text: string): boolean {
-  return /\b(upgrade|pro\s*plan|elite\s*plan|pricing|subscribe|subscription|payment|pay\s+for|how\s+much|plans?|tier|billing|₦|naira)\b/i.test(text);
-}
+// ─── Image Generation Handler ─────────────────────────────────────────────────
 
-async function handleBillingRedirect(chatId: number): Promise<void> {
+async function handleImageGeneration(msg: TelegramBot.Message, text: string): Promise<void> {
   if (!bot) return;
-  await bot.sendMessage(
-    chatId,
-    `💳 *Ready to upgrade?*\n\nHead over to my payment partner to process your upgrade natively:\n\n👉 ${PAYMENT_BOT_USERNAME}\n\nType \`/upgrade\` over there to see our NGN plans:\n• *Pro* — ₦5,000/mo (150 actions, bot hosting)\n• *Elite* — ₦15,000/mo (500 actions, DEEP BUILD, GitHub clone)\n\nOnce payment is confirmed, your tier is activated instantly here.`,
-    {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [[
-          { text: "💳 Open Payment Bot", url: `https://t.me/${PAYMENT_BOT_USERNAME.replace("@", "")}` },
-        ]],
-      },
-    }
-  );
-}
-
-async function handleApiKeyInjection(msg: TelegramBot.Message): Promise<boolean> {
-  if (!bot || !msg.text) return false;
-  const keyMatch = msg.text.match(/sk-[A-Za-z0-9_-]{20,}|devx-[A-Za-z0-9]{20,}/);
-  if (!keyMatch) return false;
-
   const telegramId = msg.from!.id;
-  await bot.deleteMessage(msg.chat.id, msg.message_id);
+  const chatId = msg.chat.id;
 
-  const encrypted = encrypt(keyMatch[0]);
-  await db.update(usersTable).set({ apiKey: encrypted }).where(eq(usersTable.telegramId, telegramId));
-
-  await bot.sendMessage(msg.chat.id,
-    "🔐 *API Key Secured*\n\nYour key has been encrypted with AES-256 and stored. The original message was scrubbed from chat for your security.",
-    { parse_mode: "Markdown" }
-  );
-  return true;
-}
-
-// ─── Command Handlers ─────────────────────────────────────────────────────────
-
-async function handleStart(msg: TelegramBot.Message): Promise<void> {
-  if (!bot) return;
-  const subscribed = await isSubscribedToChannel(msg.from!.id);
-  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
-
-  const user = await getOrCreateUser(msg.from!.id, msg.from?.first_name, msg.from?.username);
-  const tier = user.tier as Tier;
-  const remaining = TIER_LIMITS[tier].dailyActions - user.dailyActionsCounter;
-
-  await bot.sendMessage(msg.chat.id,
-    `⚡ *Welcome to WebForge*\n\nI'm your autonomous full-stack co-founder. Describe what you want to build and I'll architect, code, and deploy it — entirely through this chat.\n\n*Your plan:* ${tier.toUpperCase()}\n*Actions remaining today:* ${remaining}/${TIER_LIMITS[tier].dailyActions}\n\n*What I can build for you:*\n• Full-stack web apps\n• Telegram bots (hosted permanently)\n• Landing pages with AI chat widgets\n• REST APIs and microservices\n• Image generation pipelines\n\nType \`/help\` to see all commands, or just tell me what you need built.`,
-    { parse_mode: "Markdown" }
-  );
-}
-
-async function handleHelp(msg: TelegramBot.Message): Promise<void> {
-  if (!bot) return;
-  const subscribed = await isSubscribedToChannel(msg.from!.id);
-  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
-
-  await bot.sendMessage(msg.chat.id,
-    `🛠 *WebForge Commands*\n\n\`/start\` — Welcome & your status\n\`/projects\` — List your projects\n\`/workspace <id>\` — View project status\n\`/upgrade\` — View plans & upgrade\n\`/status\` — Account details\n\`/help\` — This menu\n\n*Building:* Just describe what you want in plain English. I handle the rest.\n\n*Bot-as-a-Service:* Include a Telegram bot token in your message and I'll deploy it permanently (Pro/Elite only).\n\n*Elite users get DEEP BUILD:* Up to 5 rounds of self-correcting code generation with live progress tracking.`,
-    { parse_mode: "Markdown" }
-  );
-}
-
-async function handleProjects(msg: TelegramBot.Message): Promise<void> {
-  if (!bot) return;
-  const subscribed = await isSubscribedToChannel(msg.from!.id);
-  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
-
-  const telegramId = msg.from!.id;
-  const projects = await db.select().from(projectsTable).where(eq(projectsTable.userId, telegramId));
-
-  if (projects.length === 0) {
-    await bot.sendMessage(msg.chat.id,
-      "📂 *No projects yet*\n\nTell me what to build, for example:\n_\"Build me a task manager app\"_\n_\"Create a restaurant landing page\"_\n_\"I need a Telegram quiz bot\"_",
-      { parse_mode: "Markdown" }
-    );
+  const check = await checkActionAllowed(telegramId);
+  if (!check.allowed) {
+    await bot.sendMessage(chatId, `⚠️ ${check.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
     return;
   }
 
-  const list = projects.map(p => {
-    const icon = p.status === "running" ? "🟢" : p.status === "building" ? "🟡" : "⚪";
-    const url = p.liveUrl ? `\n   [Live App](${p.liveUrl})` : `\n   [Watch Deploy](${PLATFORM_URL}/deploying/${p.id})`;
-    return `${icon} *${p.name}* — \`${p.status}\`${url}`;
-  }).join("\n\n");
+  const promptClean = text
+    .replace(/^(create|generate|make|draw|design|show)\s+(me\s+)?an?\s+/i, "")
+    .replace(/^(image|photo|picture|illustration|logo|banner)\s+of\s+/i, "")
+    .trim() || text;
 
-  await bot.sendMessage(msg.chat.id, `📁 *Your Projects*\n\n${list}`, { parse_mode: "Markdown" });
-}
-
-async function handleUpgrade(msg: TelegramBot.Message): Promise<void> {
-  await handleBillingRedirect(msg.chat.id);
-}
-
-async function handleStatus(msg: TelegramBot.Message): Promise<void> {
-  if (!bot) return;
-  const subscribed = await isSubscribedToChannel(msg.from!.id);
-  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
-
-  const user = await getOrCreateUser(msg.from!.id, msg.from?.first_name, msg.from?.username);
-  const tier = (user.tier as Tier) ?? "starter";
-  const limits = TIER_LIMITS[tier];
-  const projects = await db.select().from(projectsTable).where(eq(projectsTable.userId, msg.from!.id));
-  const remaining = limits.dailyActions - user.dailyActionsCounter;
-
-  await bot.sendMessage(msg.chat.id,
-    `📊 *Account Status*\n\n👤 *User:* ${user.firstName ?? "Anonymous"}\n🏷 *Plan:* ${tier.toUpperCase()}\n⚡ *Actions today:* ${user.dailyActionsCounter}/${limits.dailyActions} (${remaining} remaining)\n📁 *Projects:* ${projects.length}${limits.maxProjects !== Infinity ? `/${limits.maxProjects}` : " (unlimited)"}\n\n*Feature access:*\n${limits.botHosting ? "✅" : "❌"} Bot-as-a-Service hosting\n${limits.customKeys ? "✅" : "❌"} Custom API keys\n${limits.gitClone ? "✅" : "❌"} GitHub repo cloning\n${limits.deepBuild ? "✅" : "❌"} DEEP BUILD (5-round auto-correction)\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`,
+  await sendTyping(chatId);
+  const waitMsg = await bot.sendMessage(chatId,
+    `🎨 *Generating image...*\n\n_Prompt: ${promptClean.slice(0, 100)}_`,
     { parse_mode: "Markdown" }
   );
+
+  try {
+    const imageUrl = await generateImage(promptClean, telegramId);
+
+    if (!imageUrl) {
+      await bot.editMessageText("❌ Image generation returned no result. Please try a more descriptive prompt.", {
+        chat_id: chatId, message_id: waitMsg.message_id,
+      });
+      return;
+    }
+
+    // Download the image
+    const response = await fetch(imageUrl);
+    if (!response.ok) throw new Error(`Image download failed: ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    // Save to temp file
+    const tmpPath = path.join(os.tmpdir(), `wf-img-${Date.now()}.png`);
+    await fs.writeFile(tmpPath, buffer);
+
+    await bot.deleteMessage(chatId, waitMsg.message_id);
+
+    await bot.sendPhoto(chatId, tmpPath, {
+      caption: `🎨 *Generated by WebForge*\n\n_${promptClean.slice(0, 180)}_`,
+      parse_mode: "Markdown",
+    });
+
+    await fs.unlink(tmpPath).catch(() => {});
+    await incrementAction(telegramId);
+
+  } catch (err) {
+    logger.error({ err }, "Image generation error");
+    await bot.editMessageText(
+      "❌ Image generation failed. The model may be temporarily unavailable — please try again in a moment.",
+      { chat_id: chatId, message_id: waitMsg.message_id }
+    );
+  }
 }
 
-// ─── Build Orchestration ──────────────────────────────────────────────────────
+// ─── Build Prompt Builder ─────────────────────────────────────────────────────
+
+function buildCodePrompt(description: string, plan: { manifest: Array<{ path: string; description: string }>; techStack: string; summary: string }): string {
+  const fileList = plan.manifest.map(f => `- ${f.path}: ${f.description}`).join("\n");
+  return `Build a complete, production-ready application based on this request:
+
+"${description}"
+
+Tech stack: ${plan.techStack}
+
+CRITICAL REQUIREMENTS:
+1. Use plain JavaScript (NOT TypeScript) for ALL server/backend files
+2. The server MUST listen on: const PORT = process.env.PORT || 3000; app.listen(PORT, ...)
+3. package.json MUST have: "scripts": { "start": "node src/index.js" } (or equivalent .js entry)
+4. All require() or import paths must use existing packages only
+5. Include proper error handling and graceful shutdown
+
+Output ALL of the following files using this EXACT format — no exceptions:
+
+=== FILE: <relative/path/to/file> ===
+<complete file content — NO truncation, NO ellipsis>
+=== END FILE ===
+
+Files to generate:
+${fileList}
+
+Every file must be COMPLETE and RUNNABLE. The app should start successfully with: npm start`;
+}
+
+// ─── Full Build Pipeline ──────────────────────────────────────────────────────
 
 async function runFullBuild(
   chatId: number,
@@ -223,7 +220,6 @@ async function runFullBuild(
 ): Promise<void> {
   if (!bot) return;
   const pid = String(projectId);
-
   const deployingUrl = `${PLATFORM_URL}/deploying/${projectId}`;
 
   await bot.sendMessage(chatId,
@@ -235,17 +231,11 @@ async function runFullBuild(
   );
 
   try {
-    // Phase 1: Planning
-    broadcastProgress(pid, 5, "Planning your project...", 0, 0);
-    broadcastStatus(pid, "Running Ruflo planning mode...");
+    // ── Phase 1: Planning ──────────────────────────────────────────────────
+    broadcastProgress(pid, 5, "Running planning mode...", 0, 0);
 
-    const routeTaskBound = (
-      taskType: "planning",
-      prompt: string,
-      t: string,
-      tid?: number,
-      sys?: string,
-    ) => routeTask(taskType, prompt, t, tid, sys ?? WEBFORGE_SYSTEM_PROMPT);
+    const routeTaskBound = (taskType: "planning", prompt: string, t: string, tid?: number, sys?: string) =>
+      routeTask(taskType, prompt, t, tid, sys ?? WEBFORGE_SYSTEM_PROMPT);
 
     const plan = await planningMode(description, routeTaskBound, telegramId, tier);
 
@@ -260,123 +250,126 @@ async function runFullBuild(
     broadcastToProject(pid, { type: "round", round: "Plan", maxRounds: isElite ? 5 : 1, message: plan.summary });
 
     await bot.sendMessage(chatId,
-      `📋 *Build Plan Ready*\n\n${plan.summary}\n\n*Stack:* ${plan.techStack}\n*Files:* ${plan.manifest.length} files mapped\n\n${isElite ? "🔥 *DEEP BUILD active* — up to 5 self-correction rounds" : "Starting code generation..."}`,
+      `📋 *Plan Ready*\n\n${plan.summary}\n*Stack:* ${plan.techStack}\n*Files:* ${plan.manifest.length}\n\n${isElite ? "🔥 *DEEP BUILD* — up to 5 self-correction rounds" : "Starting code generation..."}`,
       { parse_mode: "Markdown" }
     );
 
-    // Phase 2: Code generation
+    // ── Phase 2: Code generation ───────────────────────────────────────────
     let finalCode = "";
 
     if (isElite) {
       broadcastProgress(pid, 22, "DeepBuild round 1 — generating code...", 0, plan.manifest.length);
 
-      const codePrompt = buildCodePrompt(description, plan);
       const deepResult = await deepBuildLoop(
-        codePrompt,
+        buildCodePrompt(description, plan),
         telegramId,
         WEBFORGE_SYSTEM_PROMPT,
         5,
         (round, maxRounds, issues) => {
-          const pct = 22 + (round / maxRounds) * 38;
+          const pct = 22 + (round / maxRounds) * 36;
           broadcastProgress(pid, pct, `DeepBuild round ${round} of ${maxRounds}...`, 0, plan.manifest.length);
           broadcastToProject(pid, { type: "round", round, maxRounds, message: issues.length ? `${issues.length} issue(s) found, correcting...` : "Clean pass" });
           bot?.sendMessage(chatId,
-            `🔄 *DeepBuild — Round ${round}/${maxRounds}*\n\n${issues.length ? `Found ${issues.length} issue(s), running self-correction...` : "Clean pass — verifying..."}`,
+            `🔄 *DeepBuild — Round ${round}/${maxRounds}*\n${issues.length ? `Found ${issues.length} issue(s), self-correcting...` : "Clean pass ✓"}`,
             { parse_mode: "Markdown" }
           ).catch(() => {});
         },
       );
 
       finalCode = deepResult.finalCode;
-      broadcastProgress(pid, 65, `Code generation complete in ${deepResult.rounds} round(s)`, 0, plan.manifest.length);
+      broadcastProgress(pid, 62, `Code done in ${deepResult.rounds} round(s)`, 0, plan.manifest.length);
 
       await bot.sendMessage(chatId,
-        `✅ *DeepBuild Complete*\n\nFinished in *${deepResult.rounds} round(s)*\nModel: \`${deepResult.model}\`\nCost: $${deepResult.totalCostUsd.toFixed(4)}\n\nWriting ${plan.manifest.length} files to disk...`,
+        `✅ *DeepBuild Complete*\n*Rounds:* ${deepResult.rounds}\n*Model:* \`${deepResult.model}\`\n*Cost:* $${deepResult.totalCostUsd.toFixed(4)}\n\nWriting ${plan.manifest.length} files...`,
         { parse_mode: "Markdown" }
       );
     } else {
       broadcastProgress(pid, 22, "Generating code...", 0, plan.manifest.length);
-      const codePrompt = buildCodePrompt(description, plan);
-      const result = await routeTask("coding", codePrompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
+      const result = await routeTask("coding", buildCodePrompt(description, plan), tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
       finalCode = result.content;
-      broadcastProgress(pid, 65, "Code generation complete", 0, plan.manifest.length);
+      broadcastProgress(pid, 62, "Code generation complete", 0, plan.manifest.length);
     }
 
-    // Phase 3: Write files
-    broadcastProgress(pid, 68, "Writing files to disk...", 0, plan.manifest.length);
+    // ── Phase 3: Write files ───────────────────────────────────────────────
+    broadcastProgress(pid, 65, "Writing files to disk...", 0, plan.manifest.length);
 
     const written = await buildProjectFiles(
-      workDir,
-      finalCode,
-      pid,
-      plan.manifest,
+      workDir, finalCode, pid, plan.manifest,
       (filesWritten, filePath) => {
-        const pct = 68 + (filesWritten / Math.max(plan.manifest.length, 1)) * 18;
+        const pct = 65 + (filesWritten / Math.max(plan.manifest.length, 1)) * 14;
         broadcastProgress(pid, pct, `Writing: ${filePath}`, filesWritten, plan.manifest.length);
       },
     );
 
-    broadcastProgress(pid, 87, `${written} files written — installing dependencies...`, written, plan.manifest.length);
+    // ── Phase 4: npm install ───────────────────────────────────────────────
+    broadcastProgress(pid, 80, "Installing dependencies...", written, plan.manifest.length);
     broadcastStatus(pid, "Running npm install...");
 
-    // Phase 4: Install deps
-    await runTerminalCommand("npm install --legacy-peer-deps --silent 2>/dev/null || true", workDir);
-    broadcastProgress(pid, 95, "Dependencies installed — starting server...", written, plan.manifest.length);
+    await runTerminalCommand(
+      "npm install --legacy-peer-deps --prefer-offline 2>&1 || npm install --legacy-peer-deps 2>&1",
+      workDir,
+      180_000,
+    );
 
     await incrementAction(telegramId);
 
-    // Phase 5: Finalise
-    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${projectId}/`;
-    await db.update(projectsTable).set({
-      status: "running",
-      liveUrl,
-    }).where(eq(projectsTable.id, projectId));
+    // ── Phase 5: Start the app ─────────────────────────────────────────────
+    const port = assignProjectPort(projectId);
+    broadcastProgress(pid, 88, `Starting app on port ${port}...`, written, plan.manifest.length);
+    broadcastStatus(pid, `Binding server to port ${port}...`);
 
-    broadcastProgress(pid, 100, "Build complete!", written, plan.manifest.length);
-    broadcastRedirect(pid, liveUrl);
+    const { pid: processPid } = await spawnProjectApp(workDir, projectId, port);
+
+    await db.update(projectsTable).set({ port, botPid: processPid ?? null }).where(eq(projectsTable.id, projectId));
+
+    // ── Phase 6: Health poll ───────────────────────────────────────────────
+    broadcastProgress(pid, 92, "Waiting for app to accept connections...", written, plan.manifest.length);
+    broadcastStatus(pid, "Health checking...");
 
     await bot.sendMessage(chatId,
-      `🎉 *Build Complete — Project #${projectId}*\n\n*${written} files written*\n\n🌐 *Your live app:*\n${liveUrl}\n\nThe deployment page will redirect there automatically.`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "🌐 Open Live App", url: liveUrl }]] },
-      }
+      `⏳ *App starting...*\n\nPolling port ${port} — this takes 15-30 seconds for npm apps.`,
+      { parse_mode: "Markdown" }
     );
+
+    const isLive = await pollAppHealth(port, 120_000, 2500);
+
+    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${projectId}/`;
+
+    await db.update(projectsTable).set({
+      status: isLive ? "running" : "error",
+      liveUrl: isLive ? liveUrl : null,
+    }).where(eq(projectsTable.id, projectId));
+
+    broadcastProgress(pid, 100, isLive ? "App is live!" : "Build complete (app may need a moment)", written, plan.manifest.length);
+    broadcastRedirect(pid, liveUrl);
+
+    if (isLive) {
+      await bot.sendMessage(chatId,
+        `🎉 *App is LIVE — Project #${projectId}*\n\n${written} files written\nPort: ${port}\n\n🌐 *Your app:*\n${liveUrl}`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🌐 Open Live App", url: liveUrl }]] },
+        }
+      );
+    } else {
+      await bot.sendMessage(chatId,
+        `⚠️ *Build Complete — App still warming up*\n\n${written} files deployed. The app process is running but hasn't started accepting HTTP requests yet.\n\n🌐 *Your URL (try in 30s):*\n${liveUrl}\n\nThe proxy page will auto-refresh and redirect when ready.`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🌐 Open App URL", url: liveUrl }]] },
+        }
+      );
+    }
 
   } catch (err) {
     logger.error({ err, projectId }, "Build pipeline error");
     await db.update(projectsTable).set({ status: "error" }).where(eq(projectsTable.id, projectId));
-    broadcastStatus(pid, "Build failed — check logs");
+    broadcastStatus(pid, "Build failed — see logs");
     await bot.sendMessage(chatId,
-      `❌ *Build Failed*\n\nProject #${projectId} encountered an error during generation. This can happen with very complex prompts.\n\nTry again with a more specific description, or contact support.`,
+      `❌ *Build Failed — Project #${projectId}*\n\nAn error occurred during generation. Please try again with a more specific description.\n\nError: ${err instanceof Error ? err.message.slice(0, 200) : "Unknown error"}`,
       { parse_mode: "Markdown" }
     );
   }
-}
-
-function buildCodePrompt(description: string, plan: { manifest: Array<{ path: string; description: string }>; techStack: string; summary: string }): string {
-  const fileList = plan.manifest.map(f => `- ${f.path}: ${f.description}`).join("\n");
-  return `Build a complete, production-ready application based on this request:
-
-"${description}"
-
-Tech stack: ${plan.techStack}
-
-Output ALL of the following files. Use this exact format for each file:
-
-=== FILE: <path> ===
-<complete file content>
-=== END FILE ===
-
-Files to generate:
-${fileList}
-
-Rules:
-- Every file must be complete — no truncation, no "..." placeholders
-- Include proper error handling in all server code
-- All imports must reference real packages appropriate to the tech stack
-- Include a working package.json with all required dependencies
-- The app must start with: node src/index.js (or equivalent entry point)`;
 }
 
 // ─── Build Request Handler ────────────────────────────────────────────────────
@@ -387,21 +380,20 @@ async function handleBuildRequest(msg: TelegramBot.Message, text: string): Promi
 
   const check = await checkActionAllowed(telegramId);
   if (!check.allowed) {
-    await bot.sendMessage(msg.chat.id,
-      `⚠️ ${check.reason}\n\nUpgrade your plan via ${PAYMENT_BOT_USERNAME} to unlock more capacity.`
-    );
+    await bot.sendMessage(msg.chat.id, `⚠️ ${check.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
     return;
   }
 
   const user = check.user!;
   const tier = user.tier as Tier;
 
+  // Bot token detection → Bot-as-a-Service
   const botTokenMatch = text.match(/(\d{9,11}:[A-Za-z0-9_-]{35,})/);
   if (botTokenMatch) {
     const botToken = botTokenMatch[1];
     if (!TIER_LIMITS[tier].botHosting) {
       await bot.sendMessage(msg.chat.id,
-        `🤖 *Bot Hosting is a PRO feature*\n\nUpgrade to *Pro* (₦5,000/mo) to host your custom Telegram bots permanently.\n\nVisit ${PAYMENT_BOT_USERNAME} and type \`/upgrade\` to get started.`,
+        `🤖 *Bot Hosting is a PRO feature*\n\nUpgrade to *Pro* (₦5,000/mo) via ${PAYMENT_BOT_USERNAME}.`,
         { parse_mode: "Markdown" }
       );
       return;
@@ -417,58 +409,43 @@ async function handleBuildRequest(msg: TelegramBot.Message, text: string): Promi
     const waitMsg = await bot.sendMessage(msg.chat.id, "🤖 Scaffolding and deploying your bot...");
 
     const [project] = await db.insert(projectsTable).values({
-      userId: telegramId,
-      name: `Bot-${Date.now()}`,
-      description: text,
-      status: "building",
-      techStack: "node-telegram-bot-api",
-      botToken,
+      userId: telegramId, name: `Bot-${Date.now()}`,
+      description: text, status: "building",
+      techStack: "node-telegram-bot-api", botToken,
     }).returning();
 
     const workDir = await ensureProjectDir(project.id, telegramId);
     await scaffoldBotProject(workDir, botToken, text, "Respond helpfully to all messages.");
-    const { pid } = spawnBotProcess(workDir, "index.mjs", { BOT_TOKEN: botToken });
+    const { pid: processPid } = spawnBotProcess(workDir, "index.mjs", { BOT_TOKEN: botToken });
 
     await db.update(projectsTable).set({
-      status: "running",
-      workDir,
-      botPid: pid,
-      isHosted: true,
+      status: "running", workDir, botPid: processPid, isHosted: true,
     }).where(eq(projectsTable.id, project.id));
 
-    const workspaceUrl = `${PLATFORM_URL}/deploying/${project.id}`;
+    const url = `${PLATFORM_URL}/deploying/${project.id}`;
     await bot.deleteMessage(msg.chat.id, waitMsg.message_id);
     await bot.sendMessage(msg.chat.id,
-      `🎉 *Bot Deployed Successfully!*\n\nYour Telegram bot is now live and polling.\n\n📁 *Project ID:* \`${project.id}\`\n📌 *Process ID:* \`${pid}\`\n\n🌐 *Project page:*\n${workspaceUrl}`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "📊 View Project", url: workspaceUrl }]] },
-      }
+      `🎉 *Bot Deployed!*\n\nYour bot is live and polling.\n📁 Project: \`${project.id}\`\n📌 PID: \`${processPid}\`\n\n${url}`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "📊 View Project", url }]] } }
     );
     return;
   }
 
   const projectCheck = await checkProjectLimitAllowed(telegramId);
   if (!projectCheck.allowed) {
-    await bot.sendMessage(msg.chat.id,
-      `⚠️ ${projectCheck.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME} to create unlimited projects.`
-    );
+    await bot.sendMessage(msg.chat.id, `⚠️ ${projectCheck.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
     return;
   }
 
   await sendTyping(msg.chat.id);
   const thinkMsg = await bot.sendMessage(msg.chat.id, "🧠 Analyzing your request...");
 
-  const planPrompt = `A user on the WebForge platform wants to build: "${text}"\n\nProvide a concise build plan: tech stack, 3-5 core features, architecture overview, and complexity estimate. Max 250 words. Be specific and encouraging.`;
-
+  const planPrompt = `A WebForge user wants to build: "${text}"\n\nGive a concise build plan: tech stack, 3-5 core features, architecture overview, complexity estimate. Max 250 words. Be specific and encouraging.`;
   const planResult = await routeTask("planning", planPrompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
 
   const [project] = await db.insert(projectsTable).values({
-    userId: telegramId,
-    name: text.slice(0, 60),
-    description: text,
-    status: "planned",
-    techStack: "fullstack",
+    userId: telegramId, name: text.slice(0, 60),
+    description: text, status: "planned", techStack: "fullstack",
   }).returning();
 
   const workDir = await ensureProjectDir(project.id, telegramId);
@@ -478,7 +455,7 @@ async function handleBuildRequest(msg: TelegramBot.Message, text: string): Promi
 
   const deployingUrl = `${PLATFORM_URL}/deploying/${project.id}`;
   await bot.sendMessage(msg.chat.id,
-    `📋 *Build Plan — Project #${project.id}*\n\n${planResult.content}\n\n---\n_Model: ${planResult.model}_`,
+    `📋 *Build Plan — Project #${project.id}*\n\n${planResult.content}\n\n_Model: ${planResult.model}_`,
     {
       parse_mode: "Markdown",
       reply_markup: {
@@ -491,9 +468,90 @@ async function handleBuildRequest(msg: TelegramBot.Message, text: string): Promi
   );
 }
 
+// ─── Command Handlers ─────────────────────────────────────────────────────────
+
+async function handleStart(msg: TelegramBot.Message): Promise<void> {
+  if (!bot) return;
+  const subscribed = await isSubscribedToChannel(msg.from!.id);
+  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
+
+  const user = await getOrCreateUser(msg.from!.id, msg.from?.first_name, msg.from?.username);
+  const tier = user.tier as Tier;
+  const remaining = TIER_LIMITS[tier].dailyActions - user.dailyActionsCounter;
+
+  await bot.sendMessage(msg.chat.id,
+    `⚡ *Welcome to WebForge*\n\nI'm your autonomous full-stack co-founder. Describe what you want to build and I'll architect, code, and deploy it entirely through this chat.\n\n*Plan:* ${tier.toUpperCase()} | *Actions left:* ${remaining}/${TIER_LIMITS[tier].dailyActions}\n\n*What I build:*\n• Full-stack web apps (live URL delivered)\n• Images, logos, banners (sent directly to chat)\n• Telegram bots (hosted permanently on Pro/Elite)\n• REST APIs and microservices\n\nType \`/help\` for commands or just tell me what to build.`,
+    { parse_mode: "Markdown" }
+  );
+}
+
+async function handleHelp(msg: TelegramBot.Message): Promise<void> {
+  if (!bot) return;
+  const subscribed = await isSubscribedToChannel(msg.from!.id);
+  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
+
+  await bot.sendMessage(msg.chat.id,
+    `🛠 *WebForge Commands*\n\n\`/start\` — Welcome & status\n\`/projects\` — List projects\n\`/workspace <id>\` — View project\n\`/upgrade\` — Plans & pricing\n\`/status\` — Account details\n\n*Image generation:* Say "create an image of..." or "generate a photo of..." — I'll send it directly here.\n\n*App building:* Describe what to build — I'll deploy it and send you a live URL.\n\n*Bot hosting:* Send a bot token in your message to deploy it permanently (Pro/Elite).`,
+    { parse_mode: "Markdown" }
+  );
+}
+
+async function handleProjects(msg: TelegramBot.Message): Promise<void> {
+  if (!bot) return;
+  const subscribed = await isSubscribedToChannel(msg.from!.id);
+  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
+
+  const projects = await db.select().from(projectsTable).where(eq(projectsTable.userId, msg.from!.id));
+
+  if (projects.length === 0) {
+    await bot.sendMessage(msg.chat.id,
+      "📂 *No projects yet*\n\nTell me what to build:\n_\"Build me a task manager\"_\n_\"Create a restaurant landing page\"_",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const list = projects.map(p => {
+    const icon = p.status === "running" ? "🟢" : p.status === "building" ? "🟡" : p.status === "error" ? "🔴" : "⚪";
+    const urlLine = p.liveUrl ? `\n   🌐 [Live App](${p.liveUrl})` : `\n   📊 [Deploy Page](${PLATFORM_URL}/deploying/${p.id})`;
+    return `${icon} *${p.name}* — \`${p.status}\`${urlLine}`;
+  }).join("\n\n");
+
+  await bot.sendMessage(msg.chat.id, `📁 *Your Projects*\n\n${list}`, { parse_mode: "Markdown" });
+}
+
+async function handleUpgrade(msg: TelegramBot.Message): Promise<void> {
+  if (!bot) return;
+  await bot.sendMessage(msg.chat.id,
+    `💳 *Upgrade WebForge Plan*\n\nHead to the payment bot:\n\n👉 ${PAYMENT_BOT_USERNAME}\n\nType \`/upgrade\` there to see NGN plans:\n• *Pro* — ₦5,000/mo\n• *Elite* — ₦15,000/mo`,
+    {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: [[{ text: "💳 Open Payment Bot", url: `https://t.me/${PAYMENT_BOT_USERNAME.replace("@", "")}` }]] },
+    }
+  );
+}
+
+async function handleStatus(msg: TelegramBot.Message): Promise<void> {
+  if (!bot) return;
+  const subscribed = await isSubscribedToChannel(msg.from!.id);
+  if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
+
+  const user = await getOrCreateUser(msg.from!.id, msg.from?.first_name, msg.from?.username);
+  const tier = (user.tier as Tier) ?? "starter";
+  const limits = TIER_LIMITS[tier];
+  const projects = await db.select().from(projectsTable).where(eq(projectsTable.userId, msg.from!.id));
+  const remaining = limits.dailyActions - user.dailyActionsCounter;
+
+  await bot.sendMessage(msg.chat.id,
+    `📊 *Account Status*\n\n👤 *User:* ${user.firstName ?? "Anonymous"}\n🏷 *Plan:* ${tier.toUpperCase()}\n⚡ *Actions today:* ${user.dailyActionsCounter}/${limits.dailyActions} (${remaining} left)\n📁 *Projects:* ${projects.length}${limits.maxProjects !== Infinity ? `/${limits.maxProjects}` : " (unlimited)"}\n\n${limits.botHosting ? "✅" : "❌"} Bot hosting | ${limits.deepBuild ? "✅" : "❌"} DEEP BUILD | ${limits.gitClone ? "✅" : "❌"} GitHub clone\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`,
+    { parse_mode: "Markdown" }
+  );
+}
+
+// ─── General Message Handler ──────────────────────────────────────────────────
+
 async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
   if (!bot || !msg.text) return;
-
   const text = msg.text;
   const telegramId = msg.from!.id;
 
@@ -502,35 +560,44 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
 
   await getOrCreateUser(telegramId, msg.from?.first_name, msg.from?.username);
 
-  const isApiKey = await handleApiKeyInjection(msg);
-  if (isApiKey) return;
-
-  if (isBillingIntent(text)) {
-    await handleBillingRedirect(msg.chat.id);
+  // API key injection
+  const keyMatch = text.match(/sk-[A-Za-z0-9_-]{20,}|devx-[A-Za-z0-9]{20,}/);
+  if (keyMatch) {
+    await bot.deleteMessage(msg.chat.id, msg.message_id);
+    const encrypted = encrypt(keyMatch[0]);
+    await db.update(usersTable).set({ apiKey: encrypted }).where(eq(usersTable.telegramId, telegramId));
+    await bot.sendMessage(msg.chat.id, "🔐 *API Key Secured* — encrypted with AES-256 and scrubbed from chat.", { parse_mode: "Markdown" });
     return;
   }
 
-  const buildKeywords = /build|create|make|develop|generate|code|write|implement|design|launch|deploy|bot|app|website|api|landing\s*page|clone|scaffold/i;
-  if (buildKeywords.test(text) && text.length > 15) {
+  // ① Image intent — MUST come before build intent check
+  if (isImageIntent(text)) {
+    await handleImageGeneration(msg, text);
+    return;
+  }
+
+  // ② Billing intent
+  if (isBillingIntent(text)) {
+    await handleUpgrade(msg);
+    return;
+  }
+
+  // ③ Build intent
+  if (isBuildIntent(text)) {
     await handleBuildRequest(msg, text);
     return;
   }
 
+  // ④ General chat — pass through with pinned WebForge identity
   const check = await checkActionAllowed(telegramId);
   if (!check.allowed) {
-    await bot.sendMessage(msg.chat.id,
-      `⚠️ ${check.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME} to unlock more daily actions.`
-    );
+    await bot.sendMessage(msg.chat.id, `⚠️ ${check.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
     return;
   }
 
   await sendTyping(msg.chat.id);
-
   const taskType = detectTaskType(text);
-  const user = check.user!;
-
-  const result = await routeTask(taskType, text, user.tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
-
+  const result = await routeTask(taskType, text, check.user!.tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
   await incrementAction(telegramId);
   await bot.sendMessage(msg.chat.id, result.content, { parse_mode: "Markdown" });
 }
@@ -562,13 +629,12 @@ export function initCoreBot(): void {
     const subscribed = await isSubscribedToChannel(msg.from!.id);
     if (!subscribed) { await sendSubscriptionGate(msg.chat.id); return; }
     const projectId = parseInt(match[1]);
-    const url = `${PLATFORM_URL}/deploying/${projectId}`;
+    const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId)).limit(1);
+    const p = rows[0];
+    const url = p?.liveUrl ?? `${PLATFORM_URL}/deploying/${projectId}`;
     await bot.sendMessage(msg.chat.id,
-      `📊 *Project #${projectId}*\n\nView your live deployment page:\n${url}`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "📊 Open Deploy Page", url }]] },
-      }
+      `📊 *Project #${projectId}* — \`${p?.status ?? "unknown"}\`\n\n${p?.liveUrl ? `🌐 Live: ${p.liveUrl}` : `📊 ${url}`}`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: p?.liveUrl ? "🌐 Open App" : "📊 Deploy Page", url }]] } }
     );
   });
 
@@ -582,21 +648,11 @@ export function initCoreBot(): void {
     if (data === "check_subscription") {
       const subscribed = await isSubscribedToChannel(telegramId);
       if (subscribed) {
-        await bot.sendMessage(chatId,
-          "✅ *Subscription verified!*\n\nWelcome to WebForge. Tell me what you want to build.",
-          { parse_mode: "Markdown" }
-        );
+        await bot.sendMessage(chatId, "✅ *Verified!* Welcome to WebForge. Tell me what to build.", { parse_mode: "Markdown" });
       } else {
         await bot.sendMessage(chatId,
-          `❌ You haven't joined yet. Please join ${REQUIRED_CHANNEL} first, then tap the button again.`,
-          {
-            reply_markup: {
-              inline_keyboard: [[
-                { text: "📢 Join Channel", url: `https://t.me/${REQUIRED_CHANNEL.replace("@", "")}` },
-                { text: "✅ I've Joined", callback_data: "check_subscription" },
-              ]],
-            },
-          }
+          `❌ Not joined yet. Join ${REQUIRED_CHANNEL} first.`,
+          { reply_markup: { inline_keyboard: [[{ text: "📢 Join Channel", url: `https://t.me/${REQUIRED_CHANNEL.replace("@", "")}` }, { text: "✅ I've Joined", callback_data: "check_subscription" }]] } }
         );
       }
       return;
@@ -614,41 +670,26 @@ export function initCoreBot(): void {
         return;
       }
 
-      const user = check.user!;
-      const tier = user.tier as Tier;
-      const isElite = tier === "elite";
-
       const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId)).limit(1);
       const project = rows[0];
-      if (!project) {
-        await bot.sendMessage(chatId, "❌ Project not found.");
+      if (!project?.workDir) {
+        await bot.sendMessage(chatId, "❌ Project not found or not initialized.");
         return;
       }
 
-      if (!project.workDir) {
-        await bot.sendMessage(chatId, "❌ Project directory not initialized. Please re-create the project.");
-        return;
-      }
+      const tier = (check.user!.tier as Tier);
+      const isElite = tier === "elite";
 
-      runFullBuild(
-        chatId,
-        telegramId,
-        projectId,
-        project.workDir,
-        project.description ?? project.name,
-        tier,
-        isElite,
-      ).catch(err => logger.error({ err, projectId }, "runFullBuild unhandled error"));
-
-      return;
+      runFullBuild(chatId, telegramId, projectId, project.workDir, project.description ?? project.name, tier, isElite)
+        .catch(err => logger.error({ err, projectId }, "runFullBuild unhandled"));
     }
   });
 
   bot.on("message", async (msg) => {
-    if (!msg.text) return;
-    if (msg.text.startsWith("/")) return;
-    await handleGeneralMessage(msg).catch(err => logger.error({ err }, "Core bot message handler error"));
+    if (!msg.text || msg.text.startsWith("/")) return;
+    await handleGeneralMessage(msg).catch(err => logger.error({ err }, "Message handler error"));
   });
 
   bot.on("polling_error", (err) => logger.error({ err }, "Core bot polling error"));
 }
+
