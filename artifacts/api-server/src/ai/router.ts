@@ -113,6 +113,7 @@ export async function deepBuildLoop(
   telegramId: number,
   systemPrompt: string,
   maxRounds = 5,
+  onRound?: (round: number, maxRounds: number, issues: string[]) => void,
 ): Promise<DeepBuildResult> {
   const model = "dev-x";
   const { client } = await getClientForUser(telegramId);
@@ -163,6 +164,7 @@ export async function deepBuildLoop(
     }
 
     errors.push(...lintErrors);
+    onRound?.(round, maxRounds, lintErrors);
 
     if (round < maxRounds) {
       messages.push({

@@ -10,6 +10,7 @@ import Dashboard from "@/pages/dashboard";
 import Projects from "@/pages/projects";
 import Workspace from "@/pages/workspace";
 import Billing from "@/pages/billing";
+import Deploying from "@/pages/deploying";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -27,6 +28,7 @@ function Router() {
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/projects" component={Projects} />
       <Route path="/workspace/:id" component={Workspace} />
+      <Route path="/deploying/:id" component={Deploying} />
       <Route path="/billing" component={Billing} />
       <Route component={NotFound} />
     </Switch>

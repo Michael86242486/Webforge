@@ -15,6 +15,9 @@ export const projectsTable = pgTable("projects", {
   botPid: integer("bot_pid"),
   personaConfig: jsonb("persona_config"),
   isHosted: boolean("is_hosted").notNull().default(false),
+  buildManifest: jsonb("build_manifest"),
+  filesTotal: integer("files_total").default(0),
+  liveUrl: text("live_url"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

@@ -34,6 +34,20 @@ export function broadcastMetrics(projectId: string, metrics: Record<string, unkn
   broadcastToProject(projectId, { type: "metrics", ...metrics });
 }
 
+export function broadcastProgress(
+  projectId: string,
+  percent: number,
+  status: string,
+  filesWritten: number,
+  filesTotal: number,
+): void {
+  broadcastToProject(projectId, { type: "progress", percent, status, filesWritten, filesTotal });
+}
+
+export function broadcastRedirect(projectId: string, url: string): void {
+  broadcastToProject(projectId, { type: "redirect", url });
+}
+
 router.get("/projects/:projectId/stream", (req: Request, res: Response) => {
   const { projectId } = req.params;
 
@@ -59,7 +73,6 @@ router.get("/projects/:projectId/stream", (req: Request, res: Response) => {
         try {
           const content = fs.readFileSync(filePath, "utf8");
           broadcastFile(projectId, filename, content);
-          broadcastToProject(projectId, { type: "reload" });
         } catch (_) {}
       });
     }

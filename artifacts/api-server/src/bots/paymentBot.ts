@@ -8,7 +8,7 @@ import { logger } from "../lib/logger.js";
 const TOKEN = process.env.PAYMENT_BOT_TOKEN ?? "";
 const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID ?? "8234256894");
 
-const BANK_INFO = `🏦 *Bank:* OPay\n📞 *Account:* 7012345678\n👤 *Name:* micha`;
+const BANK_INFO = `🏦 *Bank:* OPay\n📞 *Account:* 9036609138\n👤 *Name:*Michael farinloye idunnumi `;
 
 let bot: TelegramBot | null = null;
 
