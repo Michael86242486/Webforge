@@ -35,7 +35,7 @@ externalPort = 3000
 
 [userenv.shared]
 AI_GATEWAY_URL = "https://aimodelapi.onrender.com/v1"
-ADMIN_GROUP_ID = "-1002000000000"
+ADMIN_GROUP_ID = "8234256894"
 PROJECTS_BASE_DIR = "/home/runner/workspace/user-projects"
 PORT_RANGE_START = "4200"
 CORE_BOT_TOKEN = "8600399102:AAEXEER6aU9QmvHgCTowOlAQOtDpmtimE-c"

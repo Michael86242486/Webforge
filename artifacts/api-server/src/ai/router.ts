@@ -98,6 +98,117 @@ export async function routeTask(
   return { content, model, inputTokens, outputTokens, costUsd };
 }
 
+export interface DeepBuildResult {
+  finalCode: string;
+  rounds: number;
+  model: string;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCostUsd: number;
+  errors: string[];
+}
+
+export async function deepBuildLoop(
+  initialPrompt: string,
+  telegramId: number,
+  systemPrompt: string,
+  maxRounds = 5,
+): Promise<DeepBuildResult> {
+  const model = "dev-x";
+  const { client } = await getClientForUser(telegramId);
+
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalCostUsd = 0;
+  const errors: string[] = [];
+
+  const COST_MAP: Record<string, { input: number; output: number }> = {
+    "dev-x": { input: 0.90, output: 1.80 },
+  };
+  const costs = COST_MAP[model] ?? { input: 0.90, output: 1.80 };
+
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: systemPrompt },
+    {
+      role: "user",
+      content: `${initialPrompt}\n\nIMPORTANT: Output production-ready, complete, runnable code only. No placeholders, no TODO comments, no truncation. Include all imports, error handling, and a working entry point.`,
+    },
+  ];
+
+  let lastCode = "";
+
+  for (let round = 1; round <= maxRounds; round++) {
+    logger.info({ round, maxRounds, telegramId }, "DeepBuild round");
+
+    const completion = await client.chat.completions.create({
+      model,
+      messages,
+      temperature: 0.2,
+    });
+
+    const content = completion.choices[0]?.message?.content ?? "";
+    const inputTokens = completion.usage?.prompt_tokens ?? 0;
+    const outputTokens = completion.usage?.completion_tokens ?? 0;
+    totalInputTokens += inputTokens;
+    totalOutputTokens += outputTokens;
+    totalCostUsd += (inputTokens / 1_000_000) * costs.input + (outputTokens / 1_000_000) * costs.output;
+
+    messages.push({ role: "assistant", content });
+    lastCode = content;
+
+    const lintErrors = detectCodeIssues(content);
+    if (lintErrors.length === 0) {
+      logger.info({ round }, "DeepBuild: no issues detected, stopping early");
+      break;
+    }
+
+    errors.push(...lintErrors);
+
+    if (round < maxRounds) {
+      messages.push({
+        role: "user",
+        content: `Round ${round} review found these issues that must be fixed:\n\n${lintErrors.map((e, i) => `${i + 1}. ${e}`).join("\n")}\n\nFix ALL of them. Output the complete corrected code — no truncation, no ellipsis, no comments saying "rest of code here".`,
+      });
+    }
+  }
+
+  return {
+    finalCode: lastCode,
+    rounds: errors.length === 0 ? 1 : Math.min(maxRounds, errors.length + 1),
+    model,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCostUsd,
+    errors,
+  };
+}
+
+function detectCodeIssues(code: string): string[] {
+  const issues: string[] = [];
+  const lower = code.toLowerCase();
+
+  if (/\btodo\b|\bfixme\b|\bplaceholder\b/.test(lower)) {
+    issues.push("Code contains TODO/FIXME/placeholder markers — replace with real implementation");
+  }
+  if (/\.\.\.|\[rest of/.test(code)) {
+    issues.push("Code is truncated (contains '...' or '[rest of') — output the complete file");
+  }
+  if (/require\(['"]/.test(code) && /^import\s/m.test(code)) {
+    issues.push("Mixed CommonJS require() and ES module import — pick one module system");
+  }
+  const openBraces = (code.match(/\{/g) ?? []).length;
+  const closeBraces = (code.match(/\}/g) ?? []).length;
+  if (Math.abs(openBraces - closeBraces) > 2) {
+    issues.push(`Unbalanced braces: ${openBraces} opening vs ${closeBraces} closing`);
+  }
+  if (!/export\s+default|module\.exports|export\s+\{|export\s+function|export\s+const|export\s+class/.test(code)) {
+    if (code.length > 200) {
+      issues.push("No exports detected — ensure the module exports its main interface");
+    }
+  }
+  return issues;
+}
+
 export async function generateImage(
   prompt: string,
   telegramId?: number,

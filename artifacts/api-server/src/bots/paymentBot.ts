@@ -6,9 +6,9 @@ import { upgradeTier, getOrCreateUser, TIER_PRICES, type Tier } from "../utils/b
 import { logger } from "../lib/logger.js";
 
 const TOKEN = process.env.PAYMENT_BOT_TOKEN ?? "";
-const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID ?? "-1001000000000");
+const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID ?? "8234256894");
 
-const BANK_INFO = `🏦 *Bank:* OPay\n📞 *Account:* 7012345678\n👤 *Name:* WebForge Technologies`;
+const BANK_INFO = `🏦 *Bank:* OPay\n📞 *Account:* 7012345678\n👤 *Name:* micha`;
 
 let bot: TelegramBot | null = null;
 
@@ -137,7 +137,7 @@ export function initPaymentBot(): void {
 
   bot.onText(/\/start/, async (msg) => {
     await bot?.sendMessage(msg.chat.id,
-      "💳 *WebForge Payment Portal*\n\nUse /upgrade to view plans and upgrade your account.",
+      `💳 *WebForge Payment Portal*\n\nWelcome! I handle all plan upgrades and payment verification for @WebBuilder2Bot.\n\nUse /upgrade to view available plans and get your account upgraded.`,
       { parse_mode: "Markdown" }
     );
   });
