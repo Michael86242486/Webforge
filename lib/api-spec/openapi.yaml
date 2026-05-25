@@ -3,20 +3,28 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: WebForge PaaS API specification
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: users
+    description: User management
+  - name: projects
+    description: Project management
+  - name: payments
+    description: Payment and billing
+  - name: ai
+    description: AI generation endpoints
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +32,182 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /users/me:
+    get:
+      operationId: getMe
+      tags: [users]
+      summary: Get current user by telegram ID
+      parameters:
+        - name: telegramId
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: User found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: Not found
+
+  /users/stats:
+    get:
+      operationId: getUserStats
+      tags: [users]
+      summary: Get platform-wide stats
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformStats"
+
+  /projects:
+    get:
+      operationId: listProjects
+      tags: [projects]
+      summary: List projects for a user
+      parameters:
+        - name: userId
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+    post:
+      operationId: createProject
+      tags: [projects]
+      summary: Create a new project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+
+  /projects/{id}:
+    get:
+      operationId: getProject
+      tags: [projects]
+      summary: Get a project by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteProject
+      tags: [projects]
+      summary: Delete a project
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteResult"
+
+  /projects/{id}/persona:
+    patch:
+      operationId: updatePersona
+      tags: [projects]
+      summary: Update the AI persona config for a project
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PersonaUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+
+  /payments:
+    get:
+      operationId: listPayments
+      tags: [payments]
+      summary: List payments for a user
+      parameters:
+        - name: userId
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Payments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Payment"
+
+  /ai/generate:
+    post:
+      operationId: aiGenerate
+      tags: [ai]
+      summary: Run an AI generation task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiGenerateInput"
+      responses:
+        "200":
+          description: AI response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiGenerateResult"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +218,181 @@ components:
       required:
         - status
 
+    User:
+      type: object
+      properties:
+        telegramId:
+          type: integer
+        username:
+          type: ["string", "null"]
+        firstName:
+          type: ["string", "null"]
+        tier:
+          type: string
+        dailyActionsCounter:
+          type: integer
+        projectCount:
+          type: integer
+        isActive:
+          type: boolean
+        createdAt:
+          type: ["string", "null"]
+      required:
+        - telegramId
+        - tier
+        - dailyActionsCounter
+        - projectCount
+        - isActive
+
+    PlatformStats:
+      type: object
+      properties:
+        totalUsers:
+          type: integer
+        totalProjects:
+          type: integer
+        starterUsers:
+          type: integer
+        proUsers:
+          type: integer
+        eliteUsers:
+          type: integer
+      required:
+        - totalUsers
+        - totalProjects
+        - starterUsers
+        - proUsers
+        - eliteUsers
+
+    Project:
+      type: object
+      properties:
+        id:
+          type: integer
+        userId:
+          type: integer
+        name:
+          type: string
+        description:
+          type: ["string", "null"]
+        status:
+          type: string
+        port:
+          type: ["integer", "null"]
+        workDir:
+          type: ["string", "null"]
+        techStack:
+          type: ["string", "null"]
+        isHosted:
+          type: boolean
+        createdAt:
+          type: ["string", "null"]
+        updatedAt:
+          type: ["string", "null"]
+      required:
+        - id
+        - userId
+        - name
+        - status
+        - isHosted
+
+    ProjectInput:
+      type: object
+      properties:
+        userId:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        techStack:
+          type: string
+      required:
+        - userId
+        - name
+
+    PersonaUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        systemPrompt:
+          type: string
+        tone:
+          type: string
+        instructions:
+          type: string
+      required:
+        - systemPrompt
+
+    Payment:
+      type: object
+      properties:
+        id:
+          type: integer
+        userId:
+          type: integer
+        reference:
+          type: string
+        tier:
+          type: string
+        amountNgn:
+          type: integer
+        status:
+          type: string
+        receiptUrl:
+          type: ["string", "null"]
+        createdAt:
+          type: ["string", "null"]
+      required:
+        - id
+        - userId
+        - reference
+        - tier
+        - amountNgn
+        - status
+
+    AiGenerateInput:
+      type: object
+      properties:
+        userId:
+          type: integer
+        taskType:
+          type: string
+          description: "planning | coding | fixing | chat | image | ui"
+        prompt:
+          type: string
+        projectId:
+          type: ["integer", "null"]
+      required:
+        - userId
+        - taskType
+        - prompt
+
+    AiGenerateResult:
+      type: object
+      properties:
+        content:
+          type: string
+        model:
+          type: string
+        inputTokens:
+          type: integer
+        outputTokens:
+          type: integer
+        costUsd:
+          type: number
+      required:
+        - content
+        - model
+        - inputTokens
+        - outputTokens
+        - costUsd
+
+    DeleteResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+      required:
+        - success

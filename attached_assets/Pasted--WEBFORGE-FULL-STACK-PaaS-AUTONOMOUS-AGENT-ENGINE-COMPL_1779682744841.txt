@@ -1,0 +1,104 @@
+# WEBFORGE: FULL-STACK PaaS AUTONOMOUS AGENT ENGINE - COMPLETE SYSTEM SPECIFICATION
+
+Act as a Principal Systems Architect and Lead Backend Engineer. Your task is to build "WebForge", a conversational Telegram-First Platform-as-a-Service (PaaS) that autonomously builds, self-corrects, hosts, and monetizes full-stack applications and custom Telegram bots.
+
+Read this entire specification carefully to understand how the components interact. Execute the build sequentially, phase by phase. Do not use placeholders; write complete, production-ready JavaScript/Node.js code.
+
+---
+
+## SYSTEM ARCHITECTURE OVERVIEW
+WebForge operates as a multi-layered system:
+1. User Command Deck: A fluid, conversational ChatGPT-style Telegram Bot interface.
+2. Administrative Controller: A secondary Telegram Bot that processes manual OPay bank transfer receipts via inline approval keys.
+3. Brain Layer (Intelligent Router): An abstraction layer that dynamically routes planning, coding, and fixing tasks to specialized models via an external OpenAI-compatible gateway.
+4. Open-Source Muscle Layer: Local integrations of Ruflo (State/Concurrency) and OpenClaw (File CRUD/Terminal).
+5. Isolated Runtimes: Sandbox project directories that run separate background node apps or custom user bots.
+6. Real-Time Workspace: A split-pane web UI streaming file dabs via SSE and rendering app states via a dynamic port proxy.
+
+---
+
+## PHASE 1: ENVIRONMENT & REPOSITORY CONCURRENCY INITIALIZATION
+1. Initialize the Node.js project. Install dependencies exactly:
+   `npm install express node-telegram-bot-api pg drizzle-orm sharp dotenv cors ws`
+2. Create an absolute path directory at `/engines`. Execute shell commands to clone the core frameworks:
+   - `git clone https://github.com/ruvnet/ruflo.git engines/ruflo`
+   - `git clone https://github.com/openclaw/openclaw.git engines/openclaw`
+3. Write `src/adapters/engineOrchestrator.js`:
+   - Design a wrapper interface that instantiates both repositories.
+   - Configure Ruflo to process multi-file generation plans asynchronously using `Promise.all()` to trigger independent file writes in OpenClaw concurrently, maximizing execution velocity.
+
+---
+
+## PHASE 2: TELEMETRY METRICS AGGREGATOR
+Write `src/utils/telemetry.js` to profile and track active session metrics. The agent must update this tracking state on every tool mutation:
+- Time worked: Track execution delta using `performance.now()` from start to finish.
+- Work done: Increment an integer tracker every time OpenClaw runs a file CRUD operation or terminal command.
+- Diffs Tracking: Before a file write, read the existing disk file. Compare lines to calculate exact additions (`+`) and deletions (`-`) post-mutation.
+- Infrastructure Cost Tracking: Log input/output tokens from the AI gateway and apply a cost multiplier ($/1M tokens) based on the active model to aggregate the total 'Agent Usage' dollar metric.
+
+---
+
+## PHASE 3: SAAS DATA LAYER & BILLING ENGINE
+1. Create a PostgreSQL storage schema tracking user registration and operational ceilings:
+   - `telegram_id` (BigInt, Primary Key)
+   - `tier` (String: Defaulting to 'Starter')
+   - `api_key` (String, Encrypted, Nullable)
+   - `daily_actions_counter` (Integer, resets every 24 hours)
+2. Enforce the exact financial limits in code:
+   - STARTER (Free | ₦0/mo): Maximum 3 projects. 10 actions/24 hours. Basic models. No Deep Build. No bot hosting. No custom keys.
+   - PRO (₦5,000/mo): Unlimited projects. 150 actions/24 hours. Unlocks custom API key injection, GitHub repo cloning, and Bot-as-a-Service hosting.
+   - ELITE (₦15,000/mo): 500 actions/24 hours. Priority premium models. Unlocks autonomous multi-round "DEEP BUILD" looping (5 consecutive iterations of self-correction post-syntax compilation failure).
+
+---
+
+## PHASE 4: DUAL-BOT CONTROLLER & TELEGRAM INLINE WORKFLOWS
+Instantiate two separate polling instances inside `src/bots/`:
+
+1. CORE USER BOT (Token: 8600399102:AAEXEER6aU9QmvHgCTowOlAQOtDpmtimE-c)
+   - Conversational, human-like, supreme personality acting as an AI co-founder.
+   - Listens for natural language prompts. If engineering is requested, check the database tier, initialize the project ID, and send the streaming link: `[Platform_URL]/workspace/[Project_ID]`.
+   - Credential Scrubbing: If a message contains a user-provided API key, extract it into their encrypted database column, and immediately invoke `bot.deleteMessage()` to scrub the credential from the chat log.
+   - Bot Hosting (PaaS): If a user provides a bot token and template request, OpenClaw must scaffold a new project directory using `node-telegram-bot-api` and execute a detached background process tracking the PID to host their custom bot permanently.
+
+2. PAYMENT BOT (Token: 8902151730:AAFgJ1gtzFvL-l_dokh6yRlFposa93K-LYY)
+   - Triggered when a user types `/upgrade`. Generates an invoice displaying: Bank: OPay | Amount: [₦5,000 or ₦15,000] | Ref: WF-[Random6Digits].
+   - When user uploads a receipt image and clicks "I HAVE PAID", catch the payload and route a formatted card to your private Admin Group ID:
+     "🔔 New Payment Verification
+      User ID: [ID]
+      Plan: [Pro / Elite]
+      Reference: [Ref]
+      Receipt: [Link]"
+   - Attach an Inline Keyboard: `[✅ Approve]` and `[❌ Reject]`.
+   - Setup the `callback_query` listener. On Approve, update the user row to the corresponding tier, reset boundaries, and dispatch a verification confirmation message to the customer.
+
+---
+
+## PHASE 5: MULTI-MODEL BRAIN LAYER & MULTIMEDIA EDITING
+Write `src/ai/router.js` to process intents against the custom gateway:
+- Endpoints: Base URL: `https://aimodelapi.onrender.com/v1` | Auth: `Bearer devx-jil1s5favekhajvjsm75vahuqmw1mcna` (Fallback to user key if stored).
+- Dynamic Task Allocation:
+  - Architecture Planning & Debugging loops -> `model: "deepseek-r1"` or `"kimi-k2-thinking"`
+  - Heavy Code Generation -> `model: "dev-x"` or `"grok-3"`
+  - Light Chat & Code Tuning -> `model: "gpt-5-nano"` or `"gemini-2.5-flash-lite"`
+  - Asset Generation -> Invoke `/v1/images/generations` using `model: "image-gen"`
+- Multimedia Manipulation Skill: Expose a skill module utilizing the Node.js `sharp` library. When a user requests asset changes via chat, OpenClaw reads the project image buffer, processes the crop/resize/filter matrix dynamically via sharp, and saves it back to the workspace disk.
+
+---
+
+## PHASE 6: APP-LEVEL PERSONA VARIABLE INJECTION
+When a user builds an interactive stack requiring an internal conversational AI assistant (e.g., an e-commerce platform with a chat guide), write a standard `workspace/config/persona.json` file inside their sandbox repo.
+- Design an endpoint where modifications to this file can be pushed directly via WebForge dialogue.
+- The internal engine code of the user's generated app must read this JSON string to instantiate its system prompt array, allowing users to dynamically modify their application AI's behavior via casual chat.
+
+---
+
+## PHASE 7: STREAMING WORKSPACE VIEWPORT & DYNAMIC PROXY SERVER
+1. Create an Express server exposing a dark-themed split-screen web path at `/workspace/:projectId`.
+2. Left Pane (Streaming Code Canvas): Open a Server-Sent Events (SSE) stream path at `/api/projects/:projectId/stream`. As OpenClaw modifies workspace files, pipe character chunks live to the client UI. Embed an automated file saving payload listener that handles direct code edits typed by the user.
+3. Right Pane (Execution Sandbox Proxy): Allocate free ports (starting at 4200) for running user web apps. Implement an express-http-proxy middleware matching incoming requests from `/api/preview-proxy/:projectId/` directly to the active internal port to avoid iframe frame-ancestor blocks and cross-origin (CORS) faults.
+4. Hot Reload: Use a file watcher loop (`fs.watch`) on the project workspace folder. Upon file modification, push an SSE reload ping to the client frame to refresh the application preview canvas immediately.
+
+---
+
+## INITIALIZATION PROCEDURES
+Begin immediately by running Phase 1. Confirm that your dependencies are mapped and your open-source engine codes are safely downloaded to the file tree before proceeding to Phase 2. Ensure all file operations are fully coded out.

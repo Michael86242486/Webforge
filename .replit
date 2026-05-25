@@ -18,3 +18,27 @@ expertMode = true
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[[ports]]
+localPort = 23726
+externalPort = 3000
+
+[userenv]
+
+[userenv.shared]
+AI_GATEWAY_URL = "https://aimodelapi.onrender.com/v1"
+ADMIN_GROUP_ID = "-1002000000000"
+PROJECTS_BASE_DIR = "/home/runner/workspace/user-projects"
+PORT_RANGE_START = "4200"
+CORE_BOT_TOKEN = "8600399102:AAEXEER6aU9QmvHgCTowOlAQOtDpmtimE-c"
+PAYMENT_BOT_TOKEN = "8902151730:AAFgJ1gtzFvL-l_dokh6yRlFposa93K-LYY"
+AI_GATEWAY_KEY = "devx-jil1s5favekhajvjsm75vahuqmw1mcna"
+ENCRYPTION_KEY = "webforge32byteskeyforencryption!"
