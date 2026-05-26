@@ -4,6 +4,20 @@ import { initCoreBot } from "./bots/coreBot.js";
 import { initPaymentBot } from "./bots/paymentBot.js";
 import fs from "fs";
 
+// ─── Global Error Safety Net ──────────────────────────────────────────────────
+// Prevents the process from dying on unhandled promise rejections (e.g. Telegram
+// sendMessage throwing a 400 due to bad Markdown entities).
+
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error({ reason, promise: String(promise) }, "Unhandled promise rejection — process kept alive");
+});
+
+process.on("uncaughtException", (err) => {
+  logger.error({ err }, "Uncaught exception — process kept alive");
+});
+
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
+
 const rawPort = process.env["PORT"];
 if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
 

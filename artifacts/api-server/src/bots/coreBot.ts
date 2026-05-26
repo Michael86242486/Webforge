@@ -5,8 +5,10 @@ import {
   checkProjectLimitAllowed, TIER_LIMITS, type Tier,
 } from "../utils/billing.js";
 import { encrypt, decrypt } from "../utils/crypto.js";
+import { recordTelemetry } from "../utils/telemetry.js";
+import { safeSend, safeEdit, sendTyping, safeDelete, escapeMd } from "../utils/telegram.js";
 import { db, usersTable, projectsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import {
   ensureProjectDir, scaffoldBotProject, spawnBotProcess,
   planningMode, buildProjectFiles, runTerminalCommand,
@@ -43,7 +45,9 @@ IDENTITY (non-negotiable):
 • Never say "How can I help?" as a standalone. Always redirect to building.
 
 Capabilities: full-stack web apps, APIs, Telegram bots, AI image generation, GitHub sync, bot hosting.
-Tiers: Starter (₦0/10 actions), Pro (₦5k/150 actions), Elite (₦15k/500 + DeepBuild + GitHub).`;
+Tiers: Starter (₦0/10 actions), Pro (₦5k/150 actions), Elite (₦15k/500 + DeepBuild + GitHub).
+
+CRITICAL: Keep responses concise — under 800 characters for chat replies. No bullet-point walls.`;
 
 // ─── State Maps ───────────────────────────────────────────────────────────────
 
@@ -63,10 +67,38 @@ interface PendingBuild {
   expiresAt: number;
 }
 
-const discoveryStates = new Map<number, DiscoveryState>();
+const discoveryStates  = new Map<number, DiscoveryState>();
 const pendingBuilds    = new Map<number, PendingBuild>();
-const activeSessions   = new Set<number>(); // session lock — one build per user at a time
-const gitPendingPush   = new Map<number, { workDir: string; projectId: number }>(); // awaiting push confirm
+const activeSessions   = new Set<number>();
+const gitPendingPush   = new Map<number, { workDir: string; projectId: number }>();
+
+// ─── NEW: Conversation Memory (last 10 exchanges per user) ────────────────────
+const conversationHistory = new Map<number, Array<{ role: "user" | "assistant"; content: string }>>();
+
+function addToHistory(userId: number, role: "user" | "assistant", content: string): void {
+  if (!conversationHistory.has(userId)) conversationHistory.set(userId, []);
+  const hist = conversationHistory.get(userId)!;
+  hist.push({ role, content: content.slice(0, 500) });
+  if (hist.length > 20) hist.splice(0, hist.length - 20);
+}
+
+function getHistory(userId: number): Array<{ role: "user" | "assistant"; content: string }> {
+  return conversationHistory.get(userId) ?? [];
+}
+
+// ─── NEW: Per-user rate limiter ───────────────────────────────────────────────
+const lastMessageTime = new Map<number, number>();
+const RATE_LIMIT_MS = 1500;
+
+function isRateLimited(userId: number): boolean {
+  const last = lastMessageTime.get(userId) ?? 0;
+  const now = Date.now();
+  if (now - last < RATE_LIMIT_MS) return true;
+  lastMessageTime.set(userId, now);
+  return false;
+}
+
+// ─── TTL Helpers ──────────────────────────────────────────────────────────────
 
 function ttl(ms = 15 * 60 * 1000) { return Date.now() + ms; }
 function expired(ts: number) { return Date.now() > ts; }
@@ -91,7 +123,6 @@ function isImageIntent(text: string): boolean {
   if (/^draw\b/.test(l)) return true;
   if (/\bprovision\s+(an?\s+)?(image|photo|picture|visual)\b/.test(l)) return true;
   if (/\b(edit|crop|resize|convert|compress|enhance|filter)\s+(an?\s+|my\s+|the\s+)?(photo|image|picture)\b/.test(l)) return true;
-  if (/\bcan\s+you\s+(edit|generate|create|make|draw)\s+(photos|images|pictures)\b/.test(l)) return true;
   if (/\b(image|photo|picture)\b/.test(l) && /\b(create|generate|make|draw|design|produce|want|need|get)\b/.test(l)) return true;
   return false;
 }
@@ -130,23 +161,21 @@ function detectTaskType(text: string): TaskType {
   return "chat";
 }
 
-// Discovery question — contextual, enthusiastic
 function discoveryQuestion(description: string): string {
   const l = description.toLowerCase();
   if (/coca.cola|pepsi|drink|beverage|food|restaurant|cafe|menu|delivery/.test(l))
-    return `Ohhh a ${description.trim()} — I can already picture how fire this is going to look! 🔥\n\nTell me more so I can map the perfect system:\n• What *sections* should it have? (Hero, product gallery, history, contact?)\n• What *vibe* are we going for — bold classic, modern minimal, or something premium?\n• Any specific brand colors or references?`;
+    return `Ohhh a ${escapeMd(description.trim())} — I can already picture how fire this is going to look! 🔥\n\nTell me more so I can map the perfect system:\n• What *sections* should it have? (Hero, product gallery, history, contact?)\n• What *vibe* are we going for — bold classic, modern minimal, or something premium?\n• Any specific brand colors or references?`;
   if (/portfolio|cv|resume|personal brand/.test(l))
-    return `A personal portfolio — love this! This is going to make you stand out 🚀\n\nA few quick things:\n• What sections do you need? (Projects, skills, about, contact?)\n• What's your style preference — ultra-minimal, bold with animations, or something editorial?\n• Any specific color palette or design references?`;
+    return `A personal portfolio — love this! This is going to make you stand out 🚀\n\nA few quick things:\n• What sections do you need? (Projects, skills, about, contact?)\n• What's your style preference — ultra-minimal, bold with animations, or editorial?\n• Any specific color palette or design references?`;
   if (/shop|store|ecommerce|sell|product|marketplace/.test(l))
     return `An online store — this one's going to convert! 🛒\n\nLet me nail the details:\n• What kind of products? Physical goods, digital downloads, services?\n• Do you need a cart + checkout, or just a product catalog?\n• Any preferred style — clean/minimal, bold/colorful, luxury?`;
   if (/dashboard|admin|analytics|tracking|crm|erp/.test(l))
-    return `A dashboard — I *love* building these! 📊 The data viz alone is going to be stunning.\n\nTell me:\n• What data will it display? (Sales, users, analytics, real-time metrics?)\n• Do you need charts, tables, or both?\n• Is there login/authentication, or is it a single-user local tool?`;
+    return `A dashboard — I *love* building these! 📊 The data viz is going to be stunning.\n\nTell me:\n• What data will it display? (Sales, users, analytics, real-time metrics?)\n• Do you need charts, tables, or both?\n• Is there login/authentication, or a single-user local tool?`;
   if (/blog|news|article|content|magazine/.test(l))
-    return `A content platform — clean and slick! 📝\n\nLet's get the details right:\n• What topics/categories will it cover?\n• Do you need user comments, a newsletter signup, or CMS-style editing?\n• Any style vibe — editorial, tech-minimal, or magazine-style?`;
+    return `A content platform — clean and slick! 📝\n\nLet's get the details right:\n• What topics/categories will it cover?\n• Do you need user comments, newsletter signup, or CMS-style editing?\n• Style vibe — editorial, tech-minimal, or magazine-style?`;
   if (/bot|telegram|discord|slack|assistant/.test(l))
-    return `A custom bot — this is going to be wild! 🤖\n\nTell me more:\n• What should the bot *do*? (Answer questions, book appointments, send alerts?)\n• Should it have a specific persona or personality?\n• Any commands or features you have in mind?`;
-  // Generic
-  return `Wow, what an idea! I'm already excited to build this 🔥\n\nLet me ask a few quick things so we build it *exactly* right:\n• What specific pages or sections should it have?\n• What style are you going for — bold and modern, clean and minimal, or something else?\n• Any features you definitely need (login, payments, search, etc.)?`;
+    return `A custom bot — this is going to be wild! 🤖\n\nTell me more:\n• What should the bot *do*? (Answer questions, book appointments, send alerts?)\n• Should it have a specific persona?\n• Any commands or features in mind?`;
+  return `Wow, what an idea! I'm already excited to build this 🔥\n\nLet me ask a few quick things so we build it *exactly* right:\n• What specific pages or sections should it have?\n• What style — bold and modern, clean and minimal, or something else?\n• Any features you definitely need (login, payments, search, etc.)?`;
 }
 
 let bot: TelegramBot | null = null;
@@ -162,17 +191,13 @@ async function isSubscribed(telegramId: number): Promise<boolean> {
 }
 
 async function sendGate(chatId: number): Promise<void> {
-  await bot?.sendMessage(chatId,
-    `🔒 *Join to Unlock WebForge*\n\nFirst, join our official channel to access the build engine:\n\n📢 ${REQUIRED_CHANNEL}\n\nThen tap *I've Joined* below ↓`,
+  await safeSend(bot!, chatId,
+    `🔒 *Join to Unlock WebForge*\n\nJoin our official channel to access the build engine:\n\n📢 ${REQUIRED_CHANNEL}\n\nThen tap *I've Joined* below ↓`,
     { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[
       { text: "📢 Join Channel", url: `https://t.me/${REQUIRED_CHANNEL.replace("@","")}` },
       { text: "✅ I've Joined", callback_data: "check_subscription" },
     ]] } }
   );
-}
-
-async function typing(chatId: number) {
-  try { await bot?.sendChatAction(chatId, "typing"); } catch {}
 }
 
 // ─── Image Generation Handler ─────────────────────────────────────────────────
@@ -184,14 +209,12 @@ async function handleImageGeneration(msg: TelegramBot.Message, text: string): Pr
 
   const check = await checkActionAllowed(telegramId);
   if (!check.allowed) {
-    await bot.sendMessage(chatId, `⚠️ ${check.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
+    await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
     return;
   }
 
-  // Enthusiastic immediate ack — user gets instant feedback
-  const ackMsg = await bot.sendMessage(chatId,
-    `Ya sure, why not! 🧬 Your image is generating right now — hang tight, this'll be worth the wait...`,
-    { parse_mode: "Markdown" }
+  const ackMsg = await safeSend(bot, chatId,
+    `Ya sure, why not! 🧬 Your image is generating right now — hang tight...`,
   );
 
   const prompt = text
@@ -210,7 +233,7 @@ async function handleImageGeneration(msg: TelegramBot.Message, text: string): Pr
     const tmp = path.join(os.tmpdir(), `wf-img-${Date.now()}.png`);
     await fs.writeFile(tmp, buf);
 
-    await bot.deleteMessage(chatId, ackMsg.message_id);
+    if (ackMsg) await safeDelete(bot, chatId, ackMsg.message_id);
     await bot.sendPhoto(chatId, tmp, {
       caption: `🎨 *Generated by WebForge AI*\n\n_"${prompt.slice(0, 180)}"_`,
       parse_mode: "Markdown",
@@ -218,12 +241,16 @@ async function handleImageGeneration(msg: TelegramBot.Message, text: string): Pr
     fs.unlink(tmp).catch(() => {});
     await incrementAction(telegramId);
 
+    addToHistory(telegramId, "user", `[Drew image: ${prompt.slice(0, 100)}]`);
+
   } catch (err) {
     logger.error({ err }, "Image generation error");
-    await bot.editMessageText(
-      `❌ Image generation hit a snag — the AI model may be warming up. Try again in a moment!\n\n_Prompt saved: "${prompt.slice(0,80)}"_`,
-      { chat_id: chatId, message_id: ackMsg.message_id, parse_mode: "Markdown" }
-    );
+    if (ackMsg) {
+      await safeEdit(bot, chatId, ackMsg.message_id,
+        `❌ Image generation hit a snag — the AI model may be warming up. Try again in a moment!\n\nPrompt saved: "${prompt.slice(0,80)}"`,
+        { parse_mode: "Markdown" }
+      );
+    }
   }
 }
 
@@ -290,9 +317,8 @@ async function runFullBuild(
 ): Promise<void> {
   if (!bot) return;
 
-  // Session lock
   if (activeSessions.has(telegramId)) {
-    await bot.sendMessage(chatId, "⏳ You already have a build running! Wait for it to finish before starting another.");
+    await safeSend(bot, chatId, "⏳ You already have a build running! Wait for it to finish before starting another.");
     return;
   }
   activeSessions.add(telegramId);
@@ -308,13 +334,12 @@ async function runFullBuild(
   const pid = String(project.id);
   const deployUrl = `${PLATFORM_URL}/deploying/${project.id}`;
 
-  await bot.sendMessage(chatId,
+  await safeSend(bot, chatId,
     `🚀 *Build Started — Project #${project.id}*\n\nLive deploy page:\n${deployUrl}`,
     { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "📊 Watch Live Build", url: deployUrl }]] } }
   );
 
   try {
-    // ── Store manifest ────────────────────────────────────────────────────
     await db.update(projectsTable).set({
       buildManifest: plan.manifest as unknown as Record<string, unknown>[],
       filesTotal: plan.manifest.length,
@@ -333,22 +358,32 @@ async function runFullBuild(
         (round, max, issues) => {
           broadcastProgress(pid, 20 + (round / max) * 38, `DeepBuild round ${round}/${max}`, 0, plan.manifest.length);
           broadcastToProject(pid, { type: "round", round, maxRounds: max, message: issues.length ? `${issues.length} issue(s) correcting...` : "Clean ✓" });
-          bot?.sendMessage(chatId, `🔄 *Round ${round}/${max}* — ${issues.length ? `${issues.length} issue(s) self-correcting...` : "Clean pass ✓"}`, { parse_mode: "Markdown" }).catch(() => {});
+          safeSend(bot!, chatId, `🔄 *Round ${round}/${max}* — ${issues.length ? `${issues.length} issue(s) self-correcting...` : "Clean pass ✓"}`, { parse_mode: "Markdown" });
         },
       );
       finalCode = deepResult.finalCode;
-      await bot.sendMessage(chatId,
-        `✅ *DeepBuild Complete*\n*Rounds:* ${deepResult.rounds} | *Model:* \`${deepResult.model}\` | *Cost:* $${deepResult.totalCostUsd.toFixed(4)}\n\nWriting ${plan.manifest.length} files...`,
+      await safeSend(bot, chatId,
+        `✅ *DeepBuild Complete*\n*Rounds:* ${deepResult.rounds} | *Cost:* $${deepResult.totalCostUsd.toFixed(4)}\n\nWriting ${plan.manifest.length} files...`,
         { parse_mode: "Markdown" }
       );
+      recordTelemetry({
+        sessionId: pid, action: "deepbuild", model: deepResult.model,
+        inputTokens: deepResult.totalInputTokens, outputTokens: deepResult.totalOutputTokens,
+        costUsd: deepResult.totalCostUsd,
+      }).catch(() => {});
     } else {
       broadcastProgress(pid, 20, "Generating application code...", 0, plan.manifest.length);
       const result = await routeTask("coding", codePrompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
       finalCode = result.content;
-      await bot.sendMessage(chatId,
-        `✅ *Code Generated* — \`${result.model}\` — $${result.costUsd.toFixed(4)}\n\nWriting files...`,
+      await safeSend(bot, chatId,
+        `✅ *Code Generated* — $${result.costUsd.toFixed(4)}\n\nWriting files...`,
         { parse_mode: "Markdown" }
       );
+      recordTelemetry({
+        sessionId: pid, action: "coding", model: result.model,
+        inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+        costUsd: result.costUsd,
+      }).catch(() => {});
     }
 
     // ── Write files ───────────────────────────────────────────────────────
@@ -362,7 +397,7 @@ async function runFullBuild(
     const syntaxErrors = await syntaxAuditFiles(workDir);
 
     if (syntaxErrors.length > 0) {
-      await bot.sendMessage(chatId,
+      await safeSend(bot, chatId,
         `🔍 *Syntax Audit* — found ${syntaxErrors.length} issue(s), auto-patching...`,
         { parse_mode: "Markdown" }
       );
@@ -373,7 +408,7 @@ async function runFullBuild(
         );
         if (ok) patched++;
       }
-      await bot.sendMessage(chatId,
+      await safeSend(bot, chatId,
         `✅ *Syntax Patch* — ${patched}/${syntaxErrors.length} issues resolved`,
         { parse_mode: "Markdown" }
       );
@@ -393,7 +428,7 @@ async function runFullBuild(
     const { pid: procPid } = await spawnProjectApp(workDir, project.id, port);
     await db.update(projectsTable).set({ port, botPid: procPid ?? null }).where(eq(projectsTable.id, project.id));
 
-    await bot.sendMessage(chatId, `⏳ *App starting on port ${port}...* (10-30s)`, { parse_mode: "Markdown" });
+    await safeSend(bot, chatId, `⏳ *App starting on port ${port}...* (10-30s)`, { parse_mode: "Markdown" });
 
     // ── Health poll ───────────────────────────────────────────────────────
     broadcastProgress(pid, 92, "Polling for HTTP response...", written, plan.manifest.length);
@@ -402,7 +437,7 @@ async function runFullBuild(
 
     // ── Self-Healing Autopsy (if app didn't start) ────────────────────────
     if (!isLive) {
-      await bot.sendMessage(chatId,
+      await safeSend(bot, chatId,
         `🔧 *App didn't respond — running self-healing autopsy...*\n_Reading crash logs and dispatching AI repair..._`,
         { parse_mode: "Markdown" }
       );
@@ -413,17 +448,17 @@ async function runFullBuild(
         prompt => routeTask("fixing", prompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT).then(r => r.content),
         (attempt, maxAttempts, fixed) => {
           broadcastStatus(pid, `Heal attempt ${attempt}/${maxAttempts}${fixed ? " ✓" : "..."}`);
-          bot?.sendMessage(chatId,
+          safeSend(bot!, chatId,
             `🔄 *Heal ${attempt}/${maxAttempts}* — ${fixed ? "✅ Fixed! App is live!" : "Still patching..."}`,
             { parse_mode: "Markdown" }
-          ).catch(() => {});
+          );
         },
         3,
       );
 
       if (healResult.healed) {
         isLive = true;
-        await bot.sendMessage(chatId,
+        await safeSend(bot, chatId,
           `✨ *Self-healed in ${healResult.attempts} attempt(s)!*\nApp is now live.`,
           { parse_mode: "Markdown" }
         );
@@ -448,7 +483,7 @@ async function runFullBuild(
     const ghToken = userRow[0]?.githubToken ? decrypt(userRow[0].githubToken) : null;
 
     if (isLive) {
-      await bot.sendMessage(chatId,
+      await safeSend(bot, chatId,
         `🎉 *App is LIVE — Project #${project.id}*\n\n✅ ${written} files deployed\n🔌 Port: ${port}${syntaxErrors.length ? `\n🔍 ${syntaxErrors.length} syntax issues auto-patched` : ""}\n\n🌐 *Your live app:*\n${liveUrl}`,
         {
           parse_mode: "Markdown",
@@ -460,9 +495,10 @@ async function runFullBuild(
           },
         }
       );
+      addToHistory(telegramId, "assistant", `Built project #${project.id}: ${description.slice(0,100)}. Live at: ${liveUrl}`);
     } else {
-      await bot.sendMessage(chatId,
-        `⚠️ *Build Complete — App warming up*\n\n${written} files deployed. The process is running but hasn't responded yet.\n\nUse \`/logs ${project.id}\` to inspect crash output, or \`/restart ${project.id}\` to retry.\n\n🌐 ${liveUrl}`,
+      await safeSend(bot, chatId,
+        `⚠️ *Build Complete — App warming up*\n\n${written} files deployed. Use \`/logs ${project.id}\` to inspect crash output.\n\n🌐 ${liveUrl}`,
         { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🌐 Try URL", url: liveUrl }, { text: "📋 View Logs", callback_data: `logs_${project.id}` }]] } }
       );
     }
@@ -471,8 +507,9 @@ async function runFullBuild(
     logger.error({ err, projectId: project.id }, "Build pipeline error");
     await db.update(projectsTable).set({ status: "error" }).where(eq(projectsTable.id, project.id));
     broadcastStatus(pid, "Build failed");
-    await bot.sendMessage(chatId,
-      `❌ *Build Failed — Project #${project.id}*\n\n${err instanceof Error ? err.message.slice(0, 300) : "Unknown error"}\n\nPlease try again with more detail.`,
+    const errMsg = err instanceof Error ? err.message.slice(0, 280) : "Unknown error";
+    await safeSend(bot, chatId,
+      `❌ *Build Failed — Project #${project.id}*\n\n${escapeMd(errMsg)}\n\nPlease try again with more detail.`,
       { parse_mode: "Markdown" }
     );
   } finally {
@@ -488,33 +525,36 @@ async function handleBuildRequest(msg: TelegramBot.Message, text: string): Promi
   const chatId = msg.chat.id;
 
   const check = await checkActionAllowed(telegramId);
-  if (!check.allowed) { await bot.sendMessage(chatId, `⚠️ ${check.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`); return; }
+  if (!check.allowed) {
+    await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
+    return;
+  }
   const tier = check.user!.tier as Tier;
 
   // Bot token detection
   const tokenMatch = text.match(/(\d{9,11}:[A-Za-z0-9_-]{35,})/);
   if (tokenMatch) {
     if (!TIER_LIMITS[tier].botHosting) {
-      await bot.sendMessage(chatId, `🤖 *Bot hosting = Pro/Elite feature*\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`, { parse_mode: "Markdown" });
+      await safeSend(bot, chatId, `🤖 *Bot hosting = Pro/Elite feature*\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`, { parse_mode: "Markdown" });
       return;
     }
     const pc = await checkProjectLimitAllowed(telegramId);
-    if (!pc.allowed) { await bot.sendMessage(chatId, `⚠️ ${pc.reason}`); return; }
-    const wait = await bot.sendMessage(chatId, "🤖 Scaffolding and deploying your bot...");
+    if (!pc.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(pc.reason ?? "Limit reached")}`); return; }
+    const wait = await safeSend(bot, chatId, "🤖 Scaffolding and deploying your bot...");
     const [proj] = await db.insert(projectsTable).values({ userId: telegramId, name: `Bot-${Date.now()}`, description: text, status: "building", techStack: "node-telegram-bot-api" }).returning();
     const wd = await ensureProjectDir(proj.id, telegramId);
     await scaffoldBotProject(wd, tokenMatch[1], text, "Respond helpfully.");
     const { pid: p2 } = spawnBotProcess(wd, "index.js", {});
     await db.update(projectsTable).set({ status: "running", workDir: wd, botPid: p2, isHosted: true }).where(eq(projectsTable.id, proj.id));
-    await bot.deleteMessage(chatId, wait.message_id);
-    await bot.sendMessage(chatId, `🎉 *Bot Deployed!* — Project #${proj.id}\nPID: \`${p2}\`\n\n${PLATFORM_URL}/deploying/${proj.id}`, { parse_mode: "Markdown" });
+    if (wait) await safeDelete(bot, chatId, wait.message_id);
+    await safeSend(bot, chatId, `🎉 *Bot Deployed!* — Project #${proj.id}\nPID: \`${p2}\`\n\n${PLATFORM_URL}/deploying/${proj.id}`, { parse_mode: "Markdown" });
     return;
   }
 
   const pc2 = await checkProjectLimitAllowed(telegramId);
-  if (!pc2.allowed) { await bot.sendMessage(chatId, `⚠️ ${pc2.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`); return; }
+  if (!pc2.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(pc2.reason ?? "Limit reached")}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`); return; }
 
-  // ── DISCOVERY GATE: vague requests get a conversation first ──────────────
+  // Discovery gate
   if (isVagueRequest(text)) {
     discoveryStates.set(telegramId, {
       baseDescription: text,
@@ -523,18 +563,17 @@ async function handleBuildRequest(msg: TelegramBot.Message, text: string): Promi
       isElite: tier === "elite",
       expiresAt: ttl(),
     });
-    await bot.sendMessage(chatId, discoveryQuestion(text), { parse_mode: "Markdown" });
+    await safeSend(bot, chatId, discoveryQuestion(text), { parse_mode: "Markdown" });
     return;
   }
 
-  // ── Detailed request: run planning immediately ────────────────────────────
   await launchPlanningFlow(chatId, telegramId, text, tier);
 }
 
 async function launchPlanningFlow(chatId: number, telegramId: number, description: string, tier: Tier): Promise<void> {
   if (!bot) return;
-  await typing(chatId);
-  const thinkMsg = await bot.sendMessage(chatId,
+  sendTyping(bot, chatId);
+  const thinkMsg = await safeSend(bot, chatId,
     `🧠 *Mapping your system...*\n_WebForge planning engine initialising..._`,
     { parse_mode: "Markdown" }
   );
@@ -548,13 +587,16 @@ async function launchPlanningFlow(chatId: number, telegramId: number, descriptio
       description, plan, tier, isElite: tier === "elite", expiresAt: ttl(),
     });
 
-    await bot.deleteMessage(chatId, thinkMsg.message_id);
+    if (thinkMsg) await safeDelete(bot, chatId, thinkMsg.message_id);
 
     const fileList = plan.manifest.slice(0, 12).map(f => `  📄 \`${f.path}\``).join("\n");
     const more = plan.manifest.length > 12 ? `\n  _...and ${plan.manifest.length - 12} more_` : "";
+    // Escape AI-generated content before embedding in Markdown
+    const safeSummary = escapeMd(plan.summary);
+    const safeStack = escapeMd(plan.techStack);
 
-    await bot.sendMessage(chatId,
-      `📋 *Build Plan Ready!*\n\n*What I'll build:* ${plan.summary}\n*Stack:* ${plan.techStack}\n*Files:* ${plan.manifest.length}\n\n*Structure:*\n${fileList}${more}\n\n${tier === "elite" ? "🔥 *DEEP BUILD* — 5-round self-correction active\n\n" : ""}Reply *YES* to build this now, or tell me what to change!`,
+    await safeSend(bot, chatId,
+      `📋 *Build Plan Ready!*\n\n*What I'll build:* ${safeSummary}\n*Stack:* ${safeStack}\n*Files:* ${plan.manifest.length}\n\n*Structure:*\n${fileList}${more}\n\n${tier === "elite" ? "🔥 *DEEP BUILD* — 5-round self-correction active\n\n" : ""}Reply *YES* to build, or tell me what to change!`,
       {
         parse_mode: "Markdown",
         reply_markup: {
@@ -567,8 +609,8 @@ async function launchPlanningFlow(chatId: number, telegramId: number, descriptio
     );
   } catch (err) {
     logger.error({ err }, "Planning error");
-    await bot.deleteMessage(chatId, thinkMsg.message_id);
-    await bot.sendMessage(chatId, "❌ Planning failed — try again with more detail about what you want to build.");
+    if (thinkMsg) await safeDelete(bot, chatId, thinkMsg.message_id);
+    await safeSend(bot, chatId, "❌ Planning failed — try again with more detail about what you want to build.");
   }
 }
 
@@ -581,8 +623,8 @@ async function handleStart(msg: TelegramBot.Message): Promise<void> {
   const tier = user.tier as Tier;
   const left = TIER_LIMITS[tier].dailyActions - user.dailyActionsCounter;
 
-  await bot.sendMessage(msg.chat.id,
-    `⚡ *Welcome to WebForge!*\n\nI'm your autonomous full-stack co-founder. Tell me what to build — I'll plan it, confirm with you, then code and deploy it live.\n\n*Plan:* ${tier.toUpperCase()} | *Actions left today:* ${left}/${TIER_LIMITS[tier].dailyActions}\n\n*Try saying:*\n🏗 _"Build a Coca-Cola promo website"_\n🎨 _"Create an image of a Lagos sunset"_\n🤖 _"Make a task manager with dark mode"_\n🐙 _"/link\_github [your PAT]"_ — connect GitHub\n\nType \`/help\` for all commands.`,
+  await safeSend(bot, msg.chat.id,
+    `⚡ *Welcome to WebForge!*\n\nI'm your autonomous full-stack co-founder. Tell me what to build — I'll plan it, confirm with you, then code and deploy it live.\n\n*Plan:* ${tier.toUpperCase()} | *Actions left today:* ${left}/${TIER_LIMITS[tier].dailyActions}\n\n*Try saying:*\n🏗 "Build a Coca-Cola promo website"\n🎨 "Create an image of a Lagos sunset"\n🤖 "Make a task manager with dark mode"\n🐙 /link\\_github — connect GitHub\n\nType /help for all commands.`,
     { parse_mode: "Markdown" }
   );
 }
@@ -590,25 +632,25 @@ async function handleStart(msg: TelegramBot.Message): Promise<void> {
 async function handleHelp(msg: TelegramBot.Message): Promise<void> {
   if (!bot) return;
   if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
-  await bot.sendMessage(msg.chat.id,
+  await safeSend(bot, msg.chat.id,
     `🛠 *WebForge Commands*\n\n` +
-    `\`/start\` — Welcome & account status\n` +
-    `\`/projects\` — Your projects list\n` +
-    `\`/workspace <id>\` — Open workspace for a project\n` +
-    `\`/restart <id>\` — Restart a stopped app\n` +
-    `\`/health <id>\` — Live health check & ping\n` +
-    `\`/logs <id>\` — Tail stdout/stderr of a running app\n` +
-    `\`/clone_repo <url>\` — Clone a GitHub repo into a project\n` +
-    `\`/link_github <PAT>\` — Connect your GitHub account\n` +
-    `\`/upgrade\` — Plans & pricing\n` +
-    `\`/status\` — Your tier, usage & API key\n` +
-    `\`/help\` — This message\n\n` +
-    `*Build an app* (just describe it):\n` +
+    `/start — Welcome & account status\n` +
+    `/projects — Your projects list\n` +
+    `/workspace \\<id\\> — Open workspace for a project\n` +
+    `/restart \\<id\\> — Restart a stopped app\n` +
+    `/health \\<id\\> — Live health check & ping\n` +
+    `/logs \\<id\\> — Tail stdout/stderr of a running app\n` +
+    `/delete \\<id\\> — Delete a project\n` +
+    `/cancel — Cancel your current build\n` +
+    `/draw \\<prompt\\> — Generate an AI image\n` +
+    `/clone\\_repo \\<url\\> — Clone a GitHub repo\n` +
+    `/link\\_github \\<PAT\\> — Connect your GitHub account\n` +
+    `/upgrade — Plans & pricing\n` +
+    `/status — Your tier, usage & API key\n` +
+    `/help — This message\n\n` +
+    `*Just describe what you want to build:*\n` +
     `_"Build me a restaurant website"_\n` +
-    `_"Make a task manager with dark mode"_\n\n` +
-    `*Generate images*:\n` +
-    `_"Create an image of a Lagos sunset"_\n` +
-    `_"Generate a logo for my coffee shop"_`,
+    `_"Make a task manager with dark mode"_`,
     { parse_mode: "Markdown" }
   );
 }
@@ -620,7 +662,7 @@ async function handleLogs(msg: TelegramBot.Message, projectId: number): Promise<
   const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId)).limit(1);
   const project = rows[0];
   if (!project || project.userId !== msg.from!.id) {
-    await bot.sendMessage(msg.chat.id, `❌ Project #${projectId} not found or doesn't belong to you.`);
+    await safeSend(bot, msg.chat.id, `❌ Project #${projectId} not found or doesn't belong to you.`);
     return;
   }
 
@@ -632,55 +674,51 @@ async function handleLogs(msg: TelegramBot.Message, projectId: number): Promise<
   try {
     const raw = await fs.readFile(path.join(workDir, "app.stdout.log"), "utf8");
     stdoutLines = raw.trim().split("\n").filter(Boolean).slice(-50);
-  } catch { stdoutLines = ["(no stdout log)"] }
+  } catch { stdoutLines = ["(no stdout log)"]; }
 
   try {
     const raw = await fs.readFile(path.join(workDir, "app.stderr.log"), "utf8");
     stderrLines = raw.trim().split("\n").filter(Boolean).slice(-20);
-  } catch { stderrLines = ["(no stderr log)"] }
+  } catch { stderrLines = ["(no stderr log)"]; }
 
-  const stdoutBlock = stdoutLines.join("\n");
-  const stderrBlock = stderrLines.join("\n");
+  const combined = `${stdoutLines.join("\n")}\n\n--- STDERR ---\n${stderrLines.join("\n")}`;
+  const truncated = combined.length > 3000 ? combined.slice(-3000) : combined;
 
-  let output = `📋 *Project #${projectId} — ${project.name.slice(0, 30)}*\n\n`;
-  output += `*STDOUT (last 50 lines):*\n\`\`\`\n${stdoutBlock}\n\`\`\`\n\n`;
-  output += `*STDERR (last 20 lines):*\n\`\`\`\n${stderrBlock}\n\`\`\``;
-
-  // Telegram hard limit is 4096 — truncate gracefully from the middle
-  if (output.length > 4000) {
-    const combined = `${stdoutBlock}\n\n--- STDERR ---\n${stderrBlock}`;
-    const truncated = combined.slice(-3000);
-    output = `📋 *Project #${projectId} — ${project.name.slice(0, 30)}*\n_(truncated — last 3000 chars)_\n\`\`\`\n${truncated}\n\`\`\``;
-  }
-
-  await bot.sendMessage(msg.chat.id, output, {
-    parse_mode: "Markdown",
-    reply_markup: {
-      inline_keyboard: [[
-        { text: "🔄 Restart App", callback_data: `restart_${projectId}` },
-        { text: "🔁 Refresh Logs", callback_data: `logs_${projectId}` },
-      ]],
-    },
-  });
+  await safeSend(bot, msg.chat.id,
+    `📋 *Project #${projectId} — ${escapeMd(project.name.slice(0, 30))}*\n\`\`\`\n${truncated}\n\`\`\``,
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🔄 Restart App", callback_data: `restart_${projectId}` },
+          { text: "🔁 Refresh Logs", callback_data: `logs_${projectId}` },
+        ]],
+      },
+    }
+  );
 }
 
 async function handleProjects(msg: TelegramBot.Message): Promise<void> {
   if (!bot) return;
   if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
-  const projects = await db.select().from(projectsTable).where(eq(projectsTable.userId, msg.from!.id));
+  const projects = await db
+    .select().from(projectsTable)
+    .where(eq(projectsTable.userId, msg.from!.id))
+    .orderBy(desc(projectsTable.id));
 
   if (!projects.length) {
-    await bot.sendMessage(msg.chat.id, `📂 *No projects yet*\n\nTell me what to build!`, { parse_mode: "Markdown" });
+    await safeSend(bot, msg.chat.id, `📂 *No projects yet*\n\nTell me what to build!`, { parse_mode: "Markdown" });
     return;
   }
 
   const list = projects.map(p => {
     const icon = p.status === "running" ? "🟢" : p.status === "building" ? "🟡" : p.status === "error" ? "🔴" : "⚪";
     const url = p.liveUrl ?? `${PLATFORM_URL}/deploying/${p.id}`;
-    return `${icon} *#${p.id}* — ${p.name.slice(0, 35)}\n   \`${p.status}\` | [${p.liveUrl ? "Open App" : "Deploy Page"}](${url})`;
+    const name = escapeMd(p.name.slice(0, 35));
+    return `${icon} *#${p.id}* — ${name}\n   \`${p.status}\` | [${p.liveUrl ? "Open App" : "Deploy Page"}](${url})`;
   }).join("\n\n");
 
-  await bot.sendMessage(msg.chat.id, `📁 *Your Projects (${projects.length})*\n\n${list}`, { parse_mode: "Markdown", disable_web_page_preview: true });
+  await safeSend(bot, msg.chat.id, `📁 *Your Projects (${projects.length})*\n\n${list}`, { parse_mode: "Markdown", disable_web_page_preview: true });
 }
 
 async function handleStatus(msg: TelegramBot.Message): Promise<void> {
@@ -691,18 +729,69 @@ async function handleStatus(msg: TelegramBot.Message): Promise<void> {
   const lims = TIER_LIMITS[tier];
   const projects = await db.select().from(projectsTable).where(eq(projectsTable.userId, msg.from!.id));
   const hasGh = !!user.githubToken;
+  const hasKey = !!user.apiKey;
+  const building = activeSessions.has(msg.from!.id);
 
-  await bot.sendMessage(msg.chat.id,
-    `📊 *Account Status*\n\n👤 *User:* ${user.firstName ?? "Anonymous"}\n🏷 *Plan:* ${tier.toUpperCase()}\n⚡ *Actions:* ${user.dailyActionsCounter}/${lims.dailyActions} (${lims.dailyActions - user.dailyActionsCounter} left)\n📁 *Projects:* ${projects.length}${lims.maxProjects !== Infinity ? `/${lims.maxProjects}` : ""}\n🐙 *GitHub:* ${hasGh ? "Connected ✅" : "Not linked"}\n\n${lims.botHosting ? "✅" : "❌"} Bot hosting  ${lims.deepBuild ? "✅" : "❌"} DeepBuild  ${lims.gitClone ? "✅" : "❌"} GitHub\n\nUpgrade: ${PAYMENT_BOT_USERNAME}`,
+  await safeSend(bot, msg.chat.id,
+    `📊 *Account Status*\n\n` +
+    `👤 *User:* ${escapeMd(user.firstName ?? "Anonymous")}\n` +
+    `🏷 *Plan:* ${tier.toUpperCase()}\n` +
+    `⚡ *Actions:* ${user.dailyActionsCounter}/${lims.dailyActions} (${lims.dailyActions - user.dailyActionsCounter} left)\n` +
+    `📁 *Projects:* ${projects.length}${lims.maxProjects !== Infinity ? `/${lims.maxProjects}` : ""}\n` +
+    `🐙 *GitHub:* ${hasGh ? "Connected ✅" : "Not linked"}\n` +
+    `🔑 *Custom API Key:* ${hasKey ? "Set ✅" : "Not set"}\n` +
+    `🔨 *Build in progress:* ${building ? "Yes ⏳" : "No"}\n\n` +
+    `${lims.botHosting ? "✅" : "❌"} Bot hosting  ${lims.deepBuild ? "✅" : "❌"} DeepBuild  ${lims.gitClone ? "✅" : "❌"} GitHub\n\n` +
+    `Upgrade: ${PAYMENT_BOT_USERNAME}`,
     { parse_mode: "Markdown" }
   );
 }
 
 async function handleUpgrade(msg: TelegramBot.Message): Promise<void> {
   if (!bot) return;
-  await bot.sendMessage(msg.chat.id,
+  await safeSend(bot, msg.chat.id,
     `💳 *WebForge Plans*\n\n🆓 *Starter* — ₦0/mo — 10 actions/day, 3 projects\n⭐ *Pro* — ₦5,000/mo — 150 actions, unlimited projects, bot hosting\n👑 *Elite* — ₦15,000/mo — 500 actions, DeepBuild, GitHub sync, priority models`,
     { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "💳 Pay & Upgrade", url: `https://t.me/${PAYMENT_BOT_USERNAME.replace("@","")}` }]] } }
+  );
+}
+
+// ─── NEW: Cancel active build ─────────────────────────────────────────────────
+
+async function handleCancel(msg: TelegramBot.Message): Promise<void> {
+  if (!bot) return;
+  const telegramId = msg.from!.id;
+  if (!activeSessions.has(telegramId) && !discoveryStates.has(telegramId) && !pendingBuilds.has(telegramId)) {
+    await safeSend(bot, msg.chat.id, "ℹ️ Nothing to cancel — you don't have an active build or pending plan.");
+    return;
+  }
+  activeSessions.delete(telegramId);
+  discoveryStates.delete(telegramId);
+  pendingBuilds.delete(telegramId);
+  await safeSend(bot, msg.chat.id, "✅ *Cancelled.* What would you like to build instead?", { parse_mode: "Markdown" });
+}
+
+// ─── NEW: Delete project ──────────────────────────────────────────────────────
+
+async function handleDelete(msg: TelegramBot.Message, projectId: number): Promise<void> {
+  if (!bot) return;
+  const telegramId = msg.from!.id;
+  const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId)).limit(1);
+  const proj = rows[0];
+  if (!proj || proj.userId !== telegramId) {
+    await safeSend(bot, msg.chat.id, `❌ Project #${projectId} not found or not yours.`);
+    return;
+  }
+  await safeSend(bot, msg.chat.id,
+    `⚠️ *Delete Project #${projectId}?*\n\n"${escapeMd(proj.name.slice(0,50))}"\n\nThis cannot be undone.`,
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🗑 Yes, Delete", callback_data: `confirm_delete_${projectId}` },
+          { text: "❌ Cancel", callback_data: "cancel_delete" },
+        ]],
+      },
+    }
   );
 }
 
@@ -715,16 +804,16 @@ async function handleRestart(msg: TelegramBot.Message, projectId: number): Promi
   const proj = rows[0];
 
   if (!proj || proj.userId !== telegramId) {
-    await bot.sendMessage(chatId, `❌ Project #${projectId} not found or not yours.`);
+    await safeSend(bot, chatId, `❌ Project #${projectId} not found or not yours.`);
     return;
   }
   if (!proj.workDir) {
-    await bot.sendMessage(chatId, `❌ Project #${projectId} has no working directory — was it fully built?`);
+    await safeSend(bot, chatId, `❌ Project #${projectId} has no working directory — was it fully built?`);
     return;
   }
 
-  await typing(chatId);
-  const msg2 = await bot.sendMessage(chatId, `🔄 *Restarting Project #${projectId}...*`, { parse_mode: "Markdown" });
+  sendTyping(bot, chatId);
+  const msg2 = await safeSend(bot, chatId, `🔄 *Restarting Project #${projectId}...*`, { parse_mode: "Markdown" });
 
   try {
     const preferred = proj.port ?? assignProjectPort(projectId);
@@ -732,24 +821,24 @@ async function handleRestart(msg: TelegramBot.Message, projectId: number): Promi
     const { pid: newPid } = await spawnProjectApp(proj.workDir, projectId, port);
     await db.update(projectsTable).set({ port, botPid: newPid ?? null, status: "running" }).where(eq(projectsTable.id, projectId));
 
-    await bot.sendMessage(chatId, `⏳ Polling port ${port} for HTTP response...`);
+    await safeSend(bot, chatId, `⏳ Polling port ${port} for HTTP response...`);
     const live = await pollAppHealth(port, 60_000);
     const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${projectId}/`;
 
     if (live) {
       await db.update(projectsTable).set({ status: "running", liveUrl }).where(eq(projectsTable.id, projectId));
     }
-    await bot.deleteMessage(chatId, msg2.message_id);
-    await bot.sendMessage(chatId,
+    if (msg2) await safeDelete(bot, chatId, msg2.message_id);
+    await safeSend(bot, chatId,
       live
         ? `✅ *Project #${projectId} is back online!*\n\n🌐 ${liveUrl}`
-        : `⚠️ *Project #${projectId} restarted* — still warming up.\n\n🌐 ${liveUrl} (auto-refreshes)`,
+        : `⚠️ *Project #${projectId} restarted* — still warming up.\n\n🌐 ${liveUrl}`,
       { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🌐 Open App", url: liveUrl }]] } }
     );
   } catch (err) {
     logger.error({ err, projectId }, "handleRestart error");
-    await bot.deleteMessage(chatId, msg2.message_id);
-    await bot.sendMessage(chatId, `❌ Restart failed: ${err instanceof Error ? err.message.slice(0, 200) : "unknown error"}`);
+    if (msg2) await safeDelete(bot, chatId, msg2.message_id);
+    await safeSend(bot, chatId, `❌ Restart failed: ${escapeMd(err instanceof Error ? err.message.slice(0, 200) : "unknown error")}`);
   }
 }
 
@@ -760,7 +849,7 @@ async function handleHealth(msg: TelegramBot.Message, projectId: number): Promis
 
   const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId)).limit(1);
   const proj = rows[0];
-  if (!proj || proj.userId !== telegramId) { await bot.sendMessage(chatId, `❌ Project #${projectId} not found.`); return; }
+  if (!proj || proj.userId !== telegramId) { await safeSend(bot, chatId, `❌ Project #${projectId} not found.`); return; }
 
   let httpStatus = "unknown";
   if (proj.port) {
@@ -783,7 +872,7 @@ async function handleHealth(msg: TelegramBot.Message, projectId: number): Promis
   }
 
   const statusIcon = proj.status === "running" ? "🟢" : proj.status === "building" ? "🟡" : "🔴";
-  await bot.sendMessage(chatId,
+  await safeSend(bot, chatId,
     `📊 *Project #${projectId} Health*\n\n${statusIcon} Status: \`${proj.status}\`\n🌐 URL: ${proj.liveUrl ?? "none"}\n🔌 Port: ${proj.port ?? "unassigned"}\n📡 HTTP: ${httpStatus}\n\n*Last logs:*\n${lastLogs}`,
     {
       parse_mode: "Markdown",
@@ -798,15 +887,15 @@ async function handleHealth(msg: TelegramBot.Message, projectId: number): Promis
 
 async function handleLinkGithub(msg: TelegramBot.Message, token: string): Promise<void> {
   if (!bot) return;
-  await bot.deleteMessage(msg.chat.id, msg.message_id); // scrub token from chat
+  await safeDelete(bot, msg.chat.id, msg.message_id);
   if (!token.startsWith("ghp_") && !token.startsWith("github_pat_") && !/^gh[a-z]_/.test(token) && token.length < 30) {
-    await bot.sendMessage(msg.chat.id, "❌ That doesn't look like a valid GitHub Personal Access Token. Get one at: https://github.com/settings/tokens\n\n_Your message was deleted to keep credentials safe._", { parse_mode: "Markdown" });
+    await safeSend(bot, msg.chat.id, "❌ That doesn't look like a valid GitHub Personal Access Token. Get one at: https://github.com/settings/tokens\n\n_Your message was deleted to keep credentials safe._", { parse_mode: "Markdown" });
     return;
   }
   const encrypted = encrypt(token);
   await db.update(usersTable).set({ githubToken: encrypted }).where(eq(usersTable.telegramId, msg.from!.id));
-  await bot.sendMessage(msg.chat.id,
-    `🐙 *GitHub Account Linked!*\n\nYour token has been encrypted with AES-256 and stored securely. Your message was deleted from the chat.\n\nYou can now:\n• Use \`/clone_repo [url]\` to clone any repo\n• Push project changes back to GitHub after builds`,
+  await safeSend(bot, msg.chat.id,
+    `🐙 *GitHub Account Linked!*\n\nYour token has been encrypted with AES-256 and stored securely. Your message was deleted from the chat.\n\nYou can now:\n• Use /clone\\_repo to clone any repo\n• Push project changes back to GitHub after builds`,
     { parse_mode: "Markdown" }
   );
 }
@@ -817,23 +906,23 @@ async function handleCloneRepo(msg: TelegramBot.Message, repoUrl: string): Promi
   const chatId = msg.chat.id;
 
   const check = await checkActionAllowed(telegramId);
-  if (!check.allowed) { await bot.sendMessage(chatId, `⚠️ ${check.reason}`); return; }
+  if (!check.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}`); return; }
 
   const tier = check.user!.tier as Tier;
   if (!TIER_LIMITS[tier].gitClone) {
-    await bot.sendMessage(chatId, `🐙 *GitHub clone requires Pro or Elite*\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`, { parse_mode: "Markdown" });
+    await safeSend(bot, chatId, `🐙 *GitHub clone requires Pro or Elite*\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`, { parse_mode: "Markdown" });
     return;
   }
 
   const userRow = await db.select().from(usersTable).where(eq(usersTable.telegramId, telegramId)).limit(1);
   const ghToken = userRow[0]?.githubToken ? decrypt(userRow[0].githubToken) : undefined;
 
-  await typing(chatId);
-  const waitMsg = await bot.sendMessage(chatId, `🐙 *Cloning repository...*\n\`${repoUrl}\``, { parse_mode: "Markdown" });
+  sendTyping(bot, chatId);
+  const waitMsg = await safeSend(bot, chatId, `🐙 *Cloning repository...*\n\`${escapeMd(repoUrl)}\``, { parse_mode: "Markdown" });
 
   try {
     const pc = await checkProjectLimitAllowed(telegramId);
-    if (!pc.allowed) { await bot.sendMessage(chatId, `⚠️ ${pc.reason}`); return; }
+    if (!pc.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(pc.reason ?? "Limit reached")}`); return; }
 
     const repoName = repoUrl.split("/").pop()?.replace(".git", "") ?? "cloned-repo";
     const [proj] = await db.insert(projectsTable).values({
@@ -850,7 +939,6 @@ async function handleCloneRepo(msg: TelegramBot.Message, repoUrl: string): Promi
       throw new Error(result.stderr.slice(0, 300));
     }
 
-    // Try to start the cloned project
     const preferred = assignProjectPort(proj.id);
     const port = await findFreePort(preferred);
     await runTerminalCommand("npm install --legacy-peer-deps 2>&1 || yarn install 2>&1", workDir, 180_000);
@@ -860,18 +948,26 @@ async function handleCloneRepo(msg: TelegramBot.Message, repoUrl: string): Promi
     const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${proj.id}/`;
     await db.update(projectsTable).set({ liveUrl: live ? liveUrl : null, status: live ? "running" : "error" }).where(eq(projectsTable.id, proj.id));
 
-    await bot.deleteMessage(chatId, waitMsg.message_id);
-    await bot.sendMessage(chatId,
-      `✅ *Repository Cloned — Project #${proj.id}*\n\n📦 ${repoName}\n🔌 Port: ${port}\n${live ? `🌐 Live: ${liveUrl}` : "⚠️ App may need a start script — check your package.json"}`,
+    if (waitMsg) await safeDelete(bot, chatId, waitMsg.message_id);
+    await safeSend(bot, chatId,
+      `✅ *Repository Cloned — Project #${proj.id}*\n\n📦 ${escapeMd(repoName)}\n🔌 Port: ${port}\n${live ? `🌐 Live: ${liveUrl}` : "⚠️ App may need a start script — check your package.json"}`,
       { parse_mode: "Markdown", reply_markup: live ? { inline_keyboard: [[{ text: "🌐 Open App", url: liveUrl }]] } : undefined }
     );
     await incrementAction(telegramId);
 
   } catch (err) {
     logger.error({ err }, "clone_repo error");
-    await bot.deleteMessage(chatId, waitMsg.message_id);
-    await bot.sendMessage(chatId, `❌ Clone failed: ${err instanceof Error ? err.message.slice(0, 300) : "unknown error"}`);
+    if (waitMsg) await safeDelete(bot, chatId, waitMsg.message_id);
+    await safeSend(bot, chatId, `❌ Clone failed: ${escapeMd(err instanceof Error ? err.message.slice(0, 300) : "unknown error")}`);
   }
+}
+
+// ─── NEW: Explicit Draw Command ───────────────────────────────────────────────
+
+async function handleDraw(msg: TelegramBot.Message, prompt: string): Promise<void> {
+  if (!bot) return;
+  if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
+  await handleImageGeneration(msg, prompt);
 }
 
 // ─── General Message Handler ──────────────────────────────────────────────────
@@ -882,73 +978,73 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
   const telegramId = msg.from!.id;
   const chatId = msg.chat.id;
 
+  // Rate limit
+  if (isRateLimited(telegramId)) return;
+
   if (!await isSubscribed(telegramId)) { await sendGate(chatId); return; }
   await getOrCreateUser(telegramId, msg.from?.first_name, msg.from?.username);
 
   // API key scrubbing
   const keyMatch = text.match(/sk-[A-Za-z0-9_-]{20,}/);
   if (keyMatch) {
-    await bot.deleteMessage(chatId, msg.message_id);
+    await safeDelete(bot, chatId, msg.message_id);
     const enc = encrypt(keyMatch[0]);
     await db.update(usersTable).set({ apiKey: enc }).where(eq(usersTable.telegramId, telegramId));
-    await bot.sendMessage(chatId, "🔐 *API Key secured* — AES-256 encrypted, scrubbed from chat.", { parse_mode: "Markdown" });
+    await safeSend(bot, chatId, "🔐 *API Key secured* — AES-256 encrypted, scrubbed from chat.", { parse_mode: "Markdown" });
     return;
   }
 
-  // ── Discovery state: user is answering a discovery question ──────────────
+  // Discovery state
   const discovery = getDiscovery(telegramId);
   if (discovery) {
     discovery.gathered.push(text);
     discoveryStates.delete(telegramId);
-
-    // Merge all context into one full description
     const fullDescription = [discovery.baseDescription, ...discovery.gathered].join(". ");
-    await bot.sendMessage(chatId,
-      `Perfect — I've got everything I need! 🔥 Let me map out the full system now...`,
-      { parse_mode: "Markdown" }
-    );
+    await safeSend(bot, chatId, `Perfect — I've got everything I need! 🔥 Let me map out the full system now...`);
     await launchPlanningFlow(chatId, telegramId, fullDescription, discovery.tier);
     return;
   }
 
-  // ── Pending confirmation: user is replying YES/NO to a plan ──────────────
+  // Pending confirmation
   const pending = getPending(telegramId);
   if (pending) {
     if (isConfirmation(text)) {
       pendingBuilds.delete(telegramId);
       const check = await checkActionAllowed(telegramId);
-      if (!check.allowed) { await bot.sendMessage(chatId, `⚠️ ${check.reason}`); return; }
-      await bot.sendMessage(chatId, "✅ *Building now — hold tight!* 🚀", { parse_mode: "Markdown" });
+      if (!check.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}`); return; }
+      await safeSend(bot, chatId, "✅ *Building now — hold tight!* 🚀", { parse_mode: "Markdown" });
       runFullBuild(chatId, telegramId, pending.description, pending.plan, pending.tier, pending.isElite).catch(logger.error);
       return;
     }
     if (isChangeRequest(text)) {
       pendingBuilds.delete(telegramId);
       const newDesc = `${pending.description}. Changes requested: ${text}`;
-      await bot.sendMessage(chatId, "✏️ *Got it — revising the plan...*", { parse_mode: "Markdown" });
+      await safeSend(bot, chatId, "✏️ *Got it — revising the plan...*", { parse_mode: "Markdown" });
       await launchPlanningFlow(chatId, telegramId, newDesc, pending.tier);
       return;
     }
   }
 
-  // ── GitHub push confirmation ──────────────────────────────────────────────
+  // GitHub push confirmation
   const ghPush = gitPendingPush.get(telegramId);
   if (ghPush && isConfirmation(text)) {
     gitPendingPush.delete(telegramId);
     const userRow = await db.select().from(usersTable).where(eq(usersTable.telegramId, telegramId)).limit(1);
     const ghToken = userRow[0]?.githubToken ? decrypt(userRow[0].githubToken) : null;
-    if (!ghToken) { await bot.sendMessage(chatId, "❌ No GitHub token linked. Use /link_github first."); return; }
-    await typing(chatId);
+    if (!ghToken) { await safeSend(bot, chatId, "❌ No GitHub token linked. Use /link_github first."); return; }
+    sendTyping(bot, chatId);
     const r = await gitPushChanges(ghPush.workDir, ghToken, "WebForge auto-commit");
-    await bot.sendMessage(chatId, r.stderr && /error|fatal/i.test(r.stderr)
-      ? `❌ Push failed: ${r.stderr.slice(0, 300)}`
-      : `✅ *Pushed to GitHub successfully!*\n\n${r.stdout.slice(0, 300)}`,
+    await safeSend(bot, chatId, r.stderr && /error|fatal/i.test(r.stderr)
+      ? `❌ Push failed: ${escapeMd(r.stderr.slice(0, 300))}`
+      : `✅ *Pushed to GitHub successfully!*\n\n${escapeMd(r.stdout.slice(0, 300))}`,
       { parse_mode: "Markdown" }
     );
     return;
   }
 
-  // ① Image intent — FIRST
+  addToHistory(telegramId, "user", text);
+
+  // ① Image intent
   if (isImageIntent(text)) { await handleImageGeneration(msg, text); return; }
 
   // ② Billing
@@ -957,147 +1053,232 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
   // ③ Build intent
   if (isBuildIntent(text)) { await handleBuildRequest(msg, text); return; }
 
-  // ④ General chat — WebForge identity locked
+  // ④ General chat with conversation memory
   const check = await checkActionAllowed(telegramId);
-  if (!check.allowed) { await bot.sendMessage(chatId, `⚠️ ${check.reason}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`); return; }
+  if (!check.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`); return; }
 
-  await typing(chatId);
-  const result = await routeTask(detectTaskType(text), text, check.user!.tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
+  sendTyping(bot, chatId);
+
+  // Build context-aware prompt with history
+  const history = getHistory(telegramId);
+  const contextPrompt = history.length > 2
+    ? `[Conversation so far:\n${history.slice(-6).map(h => `${h.role}: ${h.content}`).join("\n")}\n]\n\nLatest: ${text}`
+    : text;
+
+  const result = await routeTask(detectTaskType(text), contextPrompt, check.user!.tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
   await incrementAction(telegramId);
-  await bot.sendMessage(chatId, result.content.slice(0, 4096), { parse_mode: "Markdown" });
+
+  addToHistory(telegramId, "assistant", result.content.slice(0, 500));
+
+  recordTelemetry({
+    sessionId: String(telegramId), action: "chat", model: result.model,
+    inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+    costUsd: result.costUsd,
+  }).catch(() => {});
+
+  // Send AI content safely — escapeMd not needed here because safeSend auto-retries without parse_mode
+  await safeSend(bot, chatId, result.content, { parse_mode: "Markdown" });
+}
+
+// ─── Safe Command Wrapper ─────────────────────────────────────────────────────
+
+function safeHandler(fn: (msg: TelegramBot.Message, match?: RegExpExecArray | null) => Promise<void>) {
+  return async (msg: TelegramBot.Message, match?: RegExpExecArray | null) => {
+    try {
+      await fn(msg, match);
+    } catch (err) {
+      logger.error({ err, chatId: msg.chat.id }, "Command handler error");
+      try {
+        await bot?.sendMessage(msg.chat.id, "❌ Something went wrong — please try again.");
+      } catch {}
+    }
+  };
+}
+
+// ─── Daily Reset Timer ────────────────────────────────────────────────────────
+
+function startDailyResetTimer(): void {
+  setInterval(async () => {
+    try {
+      const { db: _db, usersTable: _ut } = await import("@workspace/db");
+      const { sql } = await import("drizzle-orm");
+      await _db.update(_ut).set({ dailyActionsCounter: 0, dailyActionsReset: new Date() });
+      logger.info("Daily action counters reset");
+    } catch (err) {
+      logger.warn({ err }, "Daily reset failed");
+    }
+  }, 60 * 60 * 1000); // every hour — only resets if last reset was >24h ago (guarded in billing.ts)
 }
 
 // ─── Bot Init ─────────────────────────────────────────────────────────────────
 
 export function initCoreBot(): void {
-  if (!TOKEN) { logger.warn("CORE_BOT_TOKEN not set"); return; }
+  if (!TOKEN) { logger.warn("CORE_BOT_TOKEN not set — core bot disabled"); return; }
 
-  bot = new TelegramBot(TOKEN, { polling: true });
+  bot = new TelegramBot(TOKEN, { polling: { interval: 1000, autoStart: true, params: { timeout: 10 } } });
   logger.info("Core bot started polling");
 
-  bot.onText(/\/start/, handleStart);
-  bot.onText(/\/help/, handleHelp);
-  bot.onText(/\/projects/, handleProjects);
-  bot.onText(/\/status/, handleStatus);
-  bot.onText(/\/upgrade/, handleUpgrade);
+  startDailyResetTimer();
 
-  bot.onText(/\/restart(?:\s+(\d+))?/, async (msg, match) => {
+  bot.onText(/\/start/, safeHandler(handleStart));
+  bot.onText(/\/help/, safeHandler(handleHelp));
+  bot.onText(/\/projects/, safeHandler(handleProjects));
+  bot.onText(/\/status/, safeHandler(handleStatus));
+  bot.onText(/\/upgrade/, safeHandler(handleUpgrade));
+  bot.onText(/\/cancel/, safeHandler(handleCancel));
+
+  bot.onText(/\/draw(?:\s+(.+))?/, safeHandler(async (msg, match) => {
+    if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
+    const prompt = match?.[1]?.trim();
+    if (!prompt) { await safeSend(bot!, msg.chat.id, "Usage: /draw <your image prompt>\n\nExample: /draw a futuristic Lagos skyline at sunset"); return; }
+    await handleDraw(msg, prompt);
+  }));
+
+  bot.onText(/\/restart(?:\s+(\d+))?/, safeHandler(async (msg, match) => {
     if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
     const id = match?.[1] ? parseInt(match[1]) : null;
-    if (!id) { await bot!.sendMessage(msg.chat.id, "Usage: /restart <project_id>"); return; }
+    if (!id) { await safeSend(bot!, msg.chat.id, "Usage: /restart <project_id>"); return; }
     await handleRestart(msg, id);
-  });
+  }));
 
-  bot.onText(/\/health(?:\s+(\d+))?/, async (msg, match) => {
+  bot.onText(/\/health(?:\s+(\d+))?/, safeHandler(async (msg, match) => {
     if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
     const id = match?.[1] ? parseInt(match[1]) : null;
-    if (!id) { await bot!.sendMessage(msg.chat.id, "Usage: /health <project_id>"); return; }
+    if (!id) { await safeSend(bot!, msg.chat.id, "Usage: /health <project_id>"); return; }
     await handleHealth(msg, id);
-  });
+  }));
 
-  bot.onText(/\/link_github(?:\s+(.+))?/, async (msg, match) => {
+  bot.onText(/\/delete(?:\s+(\d+))?/, safeHandler(async (msg, match) => {
+    if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
+    const id = match?.[1] ? parseInt(match[1]) : null;
+    if (!id) { await safeSend(bot!, msg.chat.id, "Usage: /delete <project_id>"); return; }
+    await handleDelete(msg, id);
+  }));
+
+  bot.onText(/\/link_github(?:\s+(.+))?/, safeHandler(async (msg, match) => {
     const token = match?.[1]?.trim();
     if (!token) {
-      await bot!.sendMessage(msg.chat.id,
+      await safeSend(bot!, msg.chat.id,
         `🐙 *Link GitHub Account*\n\nGet a Personal Access Token (classic) with \`repo\` scope from:\nhttps://github.com/settings/tokens\n\nThen send:\n\`/link_github ghp_your_token_here\`\n\n_Your token will be immediately deleted from chat and encrypted._`,
         { parse_mode: "Markdown" }
       );
       return;
     }
     await handleLinkGithub(msg, token);
-  });
+  }));
 
-  bot.onText(/\/logs(?:\s+(\d+))?/, async (msg, match) => {
+  bot.onText(/\/logs(?:\s+(\d+))?/, safeHandler(async (msg, match) => {
     if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
     const id = match?.[1] ? parseInt(match[1]) : null;
-    if (!id) { await bot!.sendMessage(msg.chat.id, "Usage: /logs <project_id>"); return; }
+    if (!id) { await safeSend(bot!, msg.chat.id, "Usage: /logs <project_id>"); return; }
     await handleLogs(msg, id);
-  });
+  }));
 
-  bot.onText(/\/clone_repo(?:\s+(.+))?/, async (msg, match) => {
+  bot.onText(/\/clone_repo(?:\s+(.+))?/, safeHandler(async (msg, match) => {
     if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
     const url = match?.[1]?.trim();
-    if (!url) { await bot!.sendMessage(msg.chat.id, "Usage: /clone_repo https://github.com/user/repo"); return; }
+    if (!url) { await safeSend(bot!, msg.chat.id, "Usage: /clone_repo https://github.com/user/repo"); return; }
     await handleCloneRepo(msg, url);
-  });
+  }));
 
-  bot.onText(/\/workspace(?:\s+(\d+))?/, async (msg, match) => {
+  bot.onText(/\/workspace(?:\s+(\d+))?/, safeHandler(async (msg, match) => {
+    if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
     const id = match?.[1] ? parseInt(match[1]) : null;
-    if (!id) { await bot!.sendMessage(msg.chat.id, "Usage: /workspace <project_id>"); return; }
+    if (!id) { await safeSend(bot!, msg.chat.id, "Usage: /workspace <project_id>"); return; }
     const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, id)).limit(1);
     const p = rows[0];
     const url = p?.liveUrl ?? `${PLATFORM_URL}/deploying/${id}`;
-    await bot!.sendMessage(msg.chat.id,
-      `📊 *Project #${id}* — \`${p?.status ?? "unknown"}\`\n\n${url}`,
+    await safeSend(bot!, msg.chat.id,
+      `📊 *Project #${id}* — \`${p?.status ?? "unknown"}\`\n\n*Name:* ${escapeMd(p?.name ?? "Unknown")}\n*Stack:* ${escapeMd(p?.techStack ?? "unknown")}\n\n🌐 ${url}`,
       { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: p?.liveUrl ? "🌐 Open App" : "📊 Deploy Page", url }]] } }
     );
-  });
+  }));
 
   // ── Callbacks ─────────────────────────────────────────────────────────────
   bot.on("callback_query", async (query) => {
     if (!bot || !query.data) return;
-    await bot.answerCallbackQuery(query.id);
+    try {
+      await bot.answerCallbackQuery(query.id);
+    } catch {}
     const chatId = query.message!.chat.id;
     const telegramId = query.from.id;
     const data = query.data;
 
-    if (data === "check_subscription") {
-      const ok = await isSubscribed(telegramId);
-      if (ok) {
-        await getOrCreateUser(telegramId, query.from.first_name, query.from.username);
-        await bot.sendMessage(chatId, "✅ *Verified!* Welcome to WebForge 🔥 Tell me what to build.", { parse_mode: "Markdown" });
-      } else {
-        await bot.sendMessage(chatId, `❌ Not joined yet — join ${REQUIRED_CHANNEL} first.`,
-          { reply_markup: { inline_keyboard: [[
-            { text: "📢 Join", url: `https://t.me/${REQUIRED_CHANNEL.replace("@","")}` },
-            { text: "✅ I've Joined", callback_data: "check_subscription" },
-          ]] } }
-        );
+    try {
+      if (data === "check_subscription") {
+        const ok = await isSubscribed(telegramId);
+        if (ok) {
+          await getOrCreateUser(telegramId, query.from.first_name, query.from.username);
+          await safeSend(bot, chatId, "✅ *Verified!* Welcome to WebForge 🔥 Tell me what to build.", { parse_mode: "Markdown" });
+        } else {
+          await safeSend(bot, chatId, `❌ Not joined yet — join ${REQUIRED_CHANNEL} first.`,
+            { reply_markup: { inline_keyboard: [[
+              { text: "📢 Join", url: `https://t.me/${REQUIRED_CHANNEL.replace("@","")}` },
+              { text: "✅ I've Joined", callback_data: "check_subscription" },
+            ]] } }
+          );
+        }
+        return;
       }
-      return;
-    }
 
-    if (data.startsWith("confirm_")) {
-      if (parseInt(data.replace("confirm_","")) !== telegramId) return;
-      const p = getPending(telegramId);
-      if (!p) { await bot.sendMessage(chatId, "⏰ Plan expired — describe what you want to build again."); return; }
-      pendingBuilds.delete(telegramId);
-      const check = await checkActionAllowed(telegramId);
-      if (!check.allowed) { await bot.sendMessage(chatId, `⚠️ ${check.reason}`); return; }
-      await bot.sendMessage(chatId, "🚀 *Building now!*", { parse_mode: "Markdown" });
-      runFullBuild(chatId, telegramId, p.description, p.plan, p.tier, p.isElite).catch(logger.error);
-      return;
-    }
+      if (data.startsWith("confirm_") && !data.startsWith("confirm_delete_")) {
+        if (parseInt(data.replace("confirm_","")) !== telegramId) return;
+        const p = getPending(telegramId);
+        if (!p) { await safeSend(bot, chatId, "⏰ Plan expired — describe what you want to build again."); return; }
+        pendingBuilds.delete(telegramId);
+        const check = await checkActionAllowed(telegramId);
+        if (!check.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}`); return; }
+        await safeSend(bot, chatId, "🚀 *Building now!*", { parse_mode: "Markdown" });
+        runFullBuild(chatId, telegramId, p.description, p.plan, p.tier, p.isElite).catch(logger.error);
+        return;
+      }
 
-    if (data.startsWith("replan_")) {
-      if (parseInt(data.replace("replan_","")) !== telegramId) return;
-      pendingBuilds.delete(telegramId);
-      await bot.sendMessage(chatId, "✏️ Tell me what to change and I'll revise the plan.");
-      return;
-    }
+      if (data.startsWith("confirm_delete_")) {
+        const id = parseInt(data.replace("confirm_delete_", ""));
+        const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, id)).limit(1);
+        if (rows[0]?.userId !== telegramId) return;
+        await db.update(projectsTable).set({ status: "deleted" }).where(eq(projectsTable.id, id));
+        await safeSend(bot, chatId, `🗑 *Project #${id} deleted.*`, { parse_mode: "Markdown" });
+        return;
+      }
 
-    if (data.startsWith("restart_")) {
-      const id = parseInt(data.replace("restart_",""));
-      await handleRestart(query.message as TelegramBot.Message, id);
-      return;
-    }
+      if (data === "cancel_delete") {
+        await safeSend(bot, chatId, "✅ Deletion cancelled.");
+        return;
+      }
 
-    if (data.startsWith("ghpush_")) {
-      const id = parseInt(data.replace("ghpush_",""));
-      const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, id)).limit(1);
-      if (!rows[0]?.workDir) { await bot.sendMessage(chatId, "❌ Project workDir not found."); return; }
-      gitPendingPush.set(telegramId, { workDir: rows[0].workDir, projectId: id });
-      await bot.sendMessage(chatId,
-        `🐙 *Push Project #${id} to GitHub?*\n\nThis will commit all project files and push to your linked GitHub remote.\n\nReply *YES* to confirm.`,
-        { parse_mode: "Markdown" }
-      );
-      return;
-    }
+      if (data.startsWith("replan_")) {
+        if (parseInt(data.replace("replan_","")) !== telegramId) return;
+        pendingBuilds.delete(telegramId);
+        await safeSend(bot, chatId, "✏️ Tell me what to change and I'll revise the plan.");
+        return;
+      }
 
-    if (data.startsWith("logs_")) {
-      const id = parseInt(data.replace("logs_", ""));
-      await handleLogs(query.message as TelegramBot.Message, id);
-      return;
+      if (data.startsWith("restart_")) {
+        const id = parseInt(data.replace("restart_",""));
+        await handleRestart(query.message as TelegramBot.Message, id);
+        return;
+      }
+
+      if (data.startsWith("ghpush_")) {
+        const id = parseInt(data.replace("ghpush_",""));
+        const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, id)).limit(1);
+        if (!rows[0]?.workDir) { await safeSend(bot, chatId, "❌ Project workDir not found."); return; }
+        gitPendingPush.set(telegramId, { workDir: rows[0].workDir, projectId: id });
+        await safeSend(bot, chatId,
+          `🐙 *Push Project #${id} to GitHub?*\n\nThis will commit all project files and push to your linked GitHub remote.\n\nReply *YES* to confirm.`,
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      if (data.startsWith("logs_")) {
+        const id = parseInt(data.replace("logs_", ""));
+        await handleLogs(query.message as TelegramBot.Message, id);
+        return;
+      }
+    } catch (err) {
+      logger.error({ err, data }, "Callback query handler error");
     }
   });
 
@@ -1107,5 +1288,7 @@ export function initCoreBot(): void {
     await handleGeneralMessage(msg).catch(err => logger.error({ err }, "Message handler error"));
   });
 
-  bot.on("polling_error", err => logger.error({ err }, "Core bot polling error"));
+  bot.on("polling_error", (err) => {
+    logger.warn({ err }, "Core bot polling error — continuing");
+  });
 }

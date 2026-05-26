@@ -106,6 +106,37 @@ export function summarize(sessionId: string): Record<string, unknown> {
   };
 }
 
+// ─── Lightweight one-shot telemetry recorder ──────────────────────────────────
+
+interface TelemetryRecord {
+  sessionId: string;
+  action: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  projectId?: number;
+}
+
+export async function recordTelemetry(record: TelemetryRecord): Promise<void> {
+  try {
+    await db.insert(telemetryTable).values({
+      sessionId: record.sessionId,
+      actionType: record.action,
+      model: record.model,
+      inputTokens: record.inputTokens,
+      outputTokens: record.outputTokens,
+      costUsd: record.costUsd,
+      durationMs: 0,
+      filesChanged: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+    });
+  } catch (err) {
+    logger.warn({ err }, "recordTelemetry: failed to write");
+  }
+}
+
 // ─── Dynamic Asset Hydration Engine ──────────────────────────────────────────
 // Injects royalty-free CDN image URLs into HTML/EJS based on project context.
 
