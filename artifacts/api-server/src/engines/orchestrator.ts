@@ -281,6 +281,52 @@ export interface PlanningResult {
   summary: string;
 }
 
+// ─── Planning JSON Repair Utilities ──────────────────────────────────────────
+
+/** Attempt to close a truncated JSON string so JSON.parse can succeed. */
+function repairTruncatedJson(raw: string): string {
+  let s = raw.trim();
+  // Remove trailing partial token (cut off mid-word, mid-key, mid-string)
+  s = s.replace(/,\s*$/, "");               // trailing comma
+  s = s.replace(/"[^"]*$/, '"..."');        // unclosed string — close it
+  // Count unmatched braces/brackets and close them
+  let braces = 0, brackets = 0;
+  for (const ch of s) {
+    if (ch === "{") braces++;
+    else if (ch === "}") braces--;
+    else if (ch === "[") brackets++;
+    else if (ch === "]") brackets--;
+  }
+  while (brackets > 0) { s += "]"; brackets--; }
+  while (braces > 0)   { s += "}"; braces--; }
+  return s;
+}
+
+/**
+ * Last-resort line scanner: pull "path" values from raw AI output
+ * even when the JSON structure is completely broken.
+ */
+function extractFilePathsFromLines(raw: string): FilePlan[] {
+  const files: FilePlan[] = [];
+  const seen = new Set<string>();
+  // Match: "path": "src/index.js"  or  path: src/index.js
+  const re = /['""]?path['""]?\s*:\s*['""]?([^\s,}"']+\.[a-zA-Z]{1,5})['""]?/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const p = m[1].trim().replace(/^\//, "");
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      // Try to grab description from the same line
+      const lineStart = raw.lastIndexOf("\n", m.index) + 1;
+      const lineEnd = raw.indexOf("\n", m.index + m[0].length);
+      const line = raw.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+      const descMatch = line.match(/['""]?description['""]?\s*:\s*['""]([^'"]+)['""]?/i);
+      files.push({ path: p, description: descMatch?.[1] ?? p });
+    }
+  }
+  return files;
+}
+
 export async function planningMode(
   userPrompt: string,
   routeTaskFn: (taskType: "planning", prompt: string, tier: string, telegramId?: number, systemPrompt?: string) => Promise<{ content: string; model: string }>,
@@ -310,20 +356,113 @@ RULES:
 - package.json must have: { "scripts": { "start": "node src/index.js" } }
 - Server must use process.env.PORT
 - Target 8-14 files for a complete app
-- Return ONLY the JSON object`;
+- Return ONLY the JSON object — no markdown fences, no explanation before or after`;
 
-  const result = await routeTaskFn("planning", planPrompt, tier, telegramId);
+  // ── Attempt 1: primary planning call ──────────────────────────────────────
+  let rawContent = "";
+  let techStack = "Node.js + Express";
+  let summary = userPrompt.slice(0, 80);
 
+  const attemptParse = (raw: string): { manifest: FilePlan[]; techStack: string; summary: string } | null => {
+    if (!raw || raw.trim().length < 10) return null;
+
+    // ① Strip markdown fences if the model disobeyed
+    let cleaned = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+
+    // ② Try direct parse first
+    let parsed: { techStack?: string; summary?: string; files?: FilePlan[] } | null = null;
+    try {
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (match) parsed = JSON.parse(match[0]);
+    } catch {
+      // ③ JSON was truncated — attempt structural repair
+      logger.warn({ rawLen: raw.length }, "planningMode: JSON truncated — attempting repair");
+      console.log(`[Planning] ⚠️ JSON truncated (${raw.length} chars), running repair...`);
+      try {
+        const match = cleaned.match(/\{[\s\S]*/);
+        if (match) {
+          const repaired = repairTruncatedJson(match[0]);
+          parsed = JSON.parse(repaired);
+          console.log("[Planning] ✅ JSON repair succeeded");
+        }
+      } catch (repairErr) {
+        logger.warn({ repairErr }, "planningMode: repair also failed — trying line scanner");
+      }
+    }
+
+    if (parsed) {
+      const files = parsed.files ?? [];
+      // Filter out any malformed entries
+      const validFiles = files.filter(f => f.path && typeof f.path === "string" && f.path.includes("."));
+      return {
+        manifest: validFiles,
+        techStack: parsed.techStack ?? techStack,
+        summary: parsed.summary ?? summary,
+      };
+    }
+
+    // ④ Structural parse fully failed — line-by-line path scanner
+    console.log("[Planning] 🔍 Running line-scanner fallback...");
+    const scanned = extractFilePathsFromLines(raw);
+    if (scanned.length > 0) {
+      console.log(`[Planning] 📂 Line scanner found ${scanned.length} paths`);
+      return { manifest: scanned, techStack, summary };
+    }
+
+    return null;
+  };
+
+  // ── Run primary call ───────────────────────────────────────────────────────
   try {
-    const jsonMatch = result.content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON");
-    const parsed = JSON.parse(jsonMatch[0]) as { techStack?: string; summary?: string; files?: FilePlan[] };
-    return {
-      manifest: parsed.files ?? [],
-      techStack: parsed.techStack ?? "fullstack",
-      summary: parsed.summary ?? userPrompt.slice(0, 80),
-    };
-  } catch {
+    const result = await routeTaskFn("planning", planPrompt, tier, telegramId);
+    rawContent = result.content;
+    console.log(`[Planning] Primary call returned ${rawContent.length} chars`);
+    logger.info({ contentLen: rawContent.length }, "planningMode: primary AI response received");
+  } catch (err) {
+    logger.warn({ err }, "planningMode: primary call failed");
+  }
+
+  // ── Try to extract a valid manifest ───────────────────────────────────────
+  let planResult = attemptParse(rawContent);
+
+  // ── Hard file count floor — if manifest is empty, silent retry ────────────
+  if (!planResult || planResult.manifest.length === 0) {
+    console.log("[Planning] ❌ Files === 0 — triggering silent corrective retry...");
+    logger.warn({ userPrompt: userPrompt.slice(0, 80) }, "planningMode: empty manifest — retrying with corrective instruction");
+
+    const retryPrompt = `Your previous manifest structure was malformed or incomplete. Provide a valid, clean, unbroken file array list now.
+
+User request: "${userPrompt}"
+
+Return ONLY this exact JSON structure with 8-12 files — no markdown, no prose, no truncation:
+{
+  "techStack": "Node.js + Express",
+  "summary": "Brief one-sentence app description",
+  "files": [
+    { "path": "package.json", "description": "Project manifest" },
+    { "path": "src/index.js", "description": "Express entry point using process.env.PORT" },
+    { "path": "src/routes/api.js", "description": "API endpoints" },
+    { "path": "public/index.html", "description": "Main page" },
+    { "path": "public/style.css", "description": "Stylesheet" },
+    { "path": "public/app.js", "description": "Client JavaScript" },
+    { "path": "src/middleware/auth.js", "description": "Auth middleware" },
+    { "path": "README.md", "description": "Documentation" }
+  ]
+}`;
+
+    try {
+      const retryResult = await routeTaskFn("planning", retryPrompt, tier, telegramId);
+      console.log(`[Planning] Retry returned ${retryResult.content.length} chars`);
+      planResult = attemptParse(retryResult.content);
+    } catch (retryErr) {
+      logger.warn({ retryErr }, "planningMode: retry call also failed");
+    }
+  }
+
+  // ── Final fallback — guaranteed 7-file manifest ───────────────────────────
+  if (!planResult || planResult.manifest.length === 0) {
+    logger.warn({ userPrompt: userPrompt.slice(0, 80) }, "planningMode: both attempts failed — using guaranteed fallback manifest");
+    console.log("[Planning] 🛡️ Using guaranteed fallback manifest");
     return {
       manifest: [
         { path: "package.json", description: "Project manifest" },
@@ -338,6 +477,9 @@ RULES:
       summary: userPrompt.slice(0, 80),
     };
   }
+
+  console.log(`[Planning] ✅ Manifest locked — ${planResult.manifest.length} files, stack: ${planResult.techStack}`);
+  return planResult;
 }
 
 // ─── File Parser (multi-format) ───────────────────────────────────────────────

@@ -109,10 +109,20 @@ export async function routeTask(
   const candidates = modelsForTier(taskType, tier);
   let lastErr: unknown;
 
+  // Task-type token budgets — planning and coding need large outputs to avoid truncation
+  const maxTokens: number | undefined =
+    taskType === "planning" ? 4096 :
+    taskType === "coding"   ? 8192 :
+    taskType === "fixing"   ? 4096 :
+    undefined;
+
   for (const model of candidates) {
     try {
-      logger.info({ taskType, model, tier }, "Routing AI task");
-      const completion = await client.chat.completions.create({ model, messages, temperature });
+      logger.info({ taskType, model, tier, maxTokens }, "Routing AI task");
+      const completion = await client.chat.completions.create({
+        model, messages, temperature,
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+      });
       const content = completion.choices[0]?.message?.content ?? "";
       const inputTokens = completion.usage?.prompt_tokens ?? 0;
       const outputTokens = completion.usage?.completion_tokens ?? 0;

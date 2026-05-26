@@ -110,6 +110,7 @@ export function summarize(sessionId: string): Record<string, unknown> {
 
 interface TelemetryRecord {
   sessionId: string;
+  userId?: number;
   action: string;
   model: string;
   inputTokens: number;
@@ -121,6 +122,8 @@ interface TelemetryRecord {
 export async function recordTelemetry(record: TelemetryRecord): Promise<void> {
   try {
     await db.insert(telemetryTable).values({
+      userId: record.userId ?? null,
+      projectId: record.projectId ?? null,
       sessionId: record.sessionId,
       actionType: record.action,
       model: record.model,

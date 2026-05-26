@@ -323,6 +323,7 @@ async function handleImageGeneration(msg: TelegramBot.Message, text: string): Pr
 
     recordTelemetry({
       sessionId: String(telegramId),
+      userId: telegramId,
       action: "image_gen",
       model: "Pollinations-Primary",
       inputTokens: 0,
@@ -455,7 +456,7 @@ async function runFullBuild(
         { parse_mode: "Markdown" }
       );
       recordTelemetry({
-        sessionId: pid, action: "deepbuild", model: deepResult.model,
+        sessionId: pid, userId: telegramId, action: "deepbuild", model: deepResult.model,
         inputTokens: deepResult.totalInputTokens, outputTokens: deepResult.totalOutputTokens,
         costUsd: deepResult.totalCostUsd,
       }).catch(() => {});
@@ -468,7 +469,7 @@ async function runFullBuild(
         { parse_mode: "Markdown" }
       );
       recordTelemetry({
-        sessionId: pid, action: "coding", model: result.model,
+        sessionId: pid, userId: telegramId, action: "coding", model: result.model,
         inputTokens: result.inputTokens, outputTokens: result.outputTokens,
         costUsd: result.costUsd,
       }).catch(() => {});
@@ -1190,7 +1191,7 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
   addToHistory(telegramId, "assistant", result.content.slice(0, 500));
 
   recordTelemetry({
-    sessionId: String(telegramId), action: "chat", model: result.model,
+    sessionId: String(telegramId), userId: telegramId, action: "chat", model: result.model,
     inputTokens: result.inputTokens, outputTokens: result.outputTokens,
     costUsd: result.costUsd,
   }).catch(() => {});
@@ -1246,6 +1247,57 @@ export function initCoreBot(): void {
   bot.onText(/\/status/, safeHandler(handleStatus));
   bot.onText(/\/upgrade/, safeHandler(handleUpgrade));
   bot.onText(/\/cancel/, safeHandler(handleCancel));
+
+  // ── Admin-only: /broadcast ────────────────────────────────────────────────
+  bot.onText(/\/broadcast(?:\s+([\s\S]+))?/, safeHandler(async (msg, match) => {
+    if (msg.from!.id !== ADMIN_TELEGRAM_ID) return;
+    const message = match?.[1]?.trim();
+    if (!message) {
+      await safeSend(bot!, msg.chat.id,
+        `📢 *Broadcast Usage*\n\n/broadcast <your message>\n\nExample:\n/broadcast 🚀 WebForge just shipped DeepBuild v2!`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const allUsers = await db.select({ telegramId: usersTable.telegramId }).from(usersTable);
+    if (!allUsers.length) {
+      await safeSend(bot!, msg.chat.id, "❌ No registered users found.");
+      return;
+    }
+
+    const statusMsg = await safeSend(bot!, msg.chat.id,
+      `📡 *Broadcasting to ${allUsers.length} users...*`,
+      { parse_mode: "Markdown" }
+    );
+
+    let sent = 0, failed = 0;
+    const BATCH_SIZE = 25;
+
+    for (let i = 0; i < allUsers.length; i++) {
+      const user = allUsers[i];
+      if (!user) continue;
+      try {
+        await safeSend(bot!, user.telegramId,
+          `📢 *WebForge Announcement*\n\n${message}`,
+          { parse_mode: "Markdown" }
+        );
+        sent++;
+      } catch {
+        failed++;
+      }
+      // Rate limit: pause every batch to avoid Telegram flood limits
+      if ((i + 1) % BATCH_SIZE === 0) {
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+
+    if (statusMsg) await safeDelete(bot!, msg.chat.id, statusMsg.message_id);
+    await safeSend(bot!, msg.chat.id,
+      `✅ *Broadcast Complete*\n\n📬 Delivered: ${sent}\n❌ Failed: ${failed}\n👥 Total: ${allUsers.length}`,
+      { parse_mode: "Markdown" }
+    );
+  }));
 
   // ── Admin-only: /stats ─────────────────────────────────────────────────────
   bot.onText(/\/stats/, safeHandler(async (msg) => {
