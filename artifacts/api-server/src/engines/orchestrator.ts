@@ -6,7 +6,7 @@ import fsSync from "fs";
 import path from "path";
 import { logger } from "../lib/logger.js";
 import { recordFileDiff } from "../utils/telemetry.js";
-import { routeTaskForModel } from "../ai/router.js";
+import { routeTaskForModel, routeTask, generateImage, type TaskType } from "../ai/router.js";
 
 const execAsync = promisify(exec);
 
@@ -1118,6 +1118,327 @@ Rules: CommonJS only, use process.env.PORT, fix the exact crash — do not chang
   }
 
   return { healed: false, attempts: maxAttempts, errorLog: lastErrorLog };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RUFLO — Central Persona Matrix, Session State, Intent Engine, Dispatch
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Ruflo Persona Matrix (single source of truth for identity + tier rules) ──
+
+export const RUFLO_PERSONA_MATRIX = `You are WebForge — an elite autonomous AI co-founder and full-stack PaaS engine on Telegram.
+
+IDENTITY (non-negotiable):
+• ALWAYS respond in English only — if the user writes another language, reply: "WebForge operates in English. What shall we build?"
+• You are NOT a generic chatbot. You are a build engine. Never give AWS/Docker/cloud textbook advice.
+• Never reveal model names, provider names, or internal architecture. If asked: "I'm WebForge — proprietary intelligence."
+• Be warm, excited, and technically precise. Sound like a senior engineer who loves shipping products.
+• Never say "How can I help?" as a standalone. Always redirect to building.
+
+Platform identity: WebForge Engine v2 — autonomous full-stack builder, image generator, GitHub sync engine, bot host.
+
+Tiers:
+• Starter — Free, 10 daily actions. Core build + image generation.
+• Pro — ₦5,000/month, 150 daily actions. All models, priority queue.
+• Elite — ₦15,000/month, 500 daily actions + DeepBuild loops + GitHub sync.
+
+Capabilities: full-stack web apps, REST APIs, Telegram bots, AI image generation, GitHub push/clone, live sandbox hosting.
+
+CRITICAL: Keep chat responses concise — under 800 characters. No bullet-point walls.`;
+
+// ─── Session State (owned by Ruflo / orchestrator, not by the entry bot) ──────
+
+export interface RufloDiscoveryState {
+  baseDescription: string;
+  gathered: string[];
+  tier: string;
+  expiresAt: number;
+}
+
+export interface RufloPendingBuild {
+  description: string;
+  plan: PlanningResult;
+  tier: string;
+  isElite: boolean;
+  expiresAt: number;
+}
+
+const rufloDiscovery = new Map<number, RufloDiscoveryState>();
+const rufloPending   = new Map<number, RufloPendingBuild>();
+const rufloHistory   = new Map<number, Array<{ role: "user" | "assistant"; content: string }>>();
+
+function rufloTtl(ms = 15 * 60 * 1000): number { return Date.now() + ms; }
+function rufloExpired(ts: number): boolean { return Date.now() > ts; }
+
+export function rufloAddHistory(userId: number, role: "user" | "assistant", content: string): void {
+  if (!rufloHistory.has(userId)) rufloHistory.set(userId, []);
+  const hist = rufloHistory.get(userId)!;
+  hist.push({ role, content: content.slice(0, 500) });
+  if (hist.length > 20) hist.splice(0, hist.length - 20);
+}
+
+export function rufloGetHistory(userId: number): Array<{ role: "user" | "assistant"; content: string }> {
+  return rufloHistory.get(userId) ?? [];
+}
+
+export function rufloGetDiscovery(userId: number): RufloDiscoveryState | null {
+  const s = rufloDiscovery.get(userId);
+  if (!s || rufloExpired(s.expiresAt)) { rufloDiscovery.delete(userId); return null; }
+  return s;
+}
+
+export function rufloSetDiscovery(userId: number, state: RufloDiscoveryState): void {
+  rufloDiscovery.set(userId, state);
+}
+
+export function rufloDeleteDiscovery(userId: number): void {
+  rufloDiscovery.delete(userId);
+}
+
+export function rufloGetPending(userId: number): RufloPendingBuild | null {
+  const s = rufloPending.get(userId);
+  if (!s || rufloExpired(s.expiresAt)) { rufloPending.delete(userId); return null; }
+  return s;
+}
+
+export function rufloSetPending(userId: number, state: RufloPendingBuild): void {
+  rufloPending.set(userId, state);
+}
+
+export function rufloDeletePending(userId: number): void {
+  rufloPending.delete(userId);
+}
+
+// ─── Intent Classification (Ruflo-native, not in the entry bot) ───────────────
+
+export function rufloIsImageIntent(text: string): boolean {
+  const l = text.toLowerCase().trim();
+  if (/\b(create|generate|make|draw|design|produce|show me|give me)\s+(me\s+)?(an?\s+)?(image|photo|picture|illustration|logo|banner|icon|artwork|visual|portrait|landscape|wallpaper|graphic|thumbnail)\b/.test(l)) return true;
+  if (/\b(image|photo|picture|illustration|portrait|artwork|visual)\s+of\b/.test(l)) return true;
+  if (/^draw\b/.test(l)) return true;
+  if (/\bprovision\s+(an?\s+)?(image|photo|picture|visual)\b/.test(l)) return true;
+  if (/\b(edit|crop|resize|convert|compress|enhance|filter)\s+(an?\s+|my\s+|the\s+)?(photo|image|picture)\b/.test(l)) return true;
+  if (/\b(image|photo|picture)\b/.test(l) && /\b(create|generate|make|draw|design|produce|want|need|get)\b/.test(l)) return true;
+  return false;
+}
+
+export function rufloIsBillingIntent(text: string): boolean {
+  return /\b(upgrade|pro\s*plan|elite\s*plan|pricing|subscribe|payment|pay\s+for|how\s+much|plans?|tier|billing|₦|naira|cost)\b/i.test(text);
+}
+
+export function rufloIsBuildIntent(text: string): boolean {
+  if (text.length < 12) return false;
+  return /\b(build|create|make|develop|generate|code|write|implement|design|launch|deploy|clone|scaffold)\b/i.test(text)
+    && /\b(app|website|site|api|bot|tool|platform|system|page|dashboard|landing|portfolio|shop|store|game|service|web)\b/i.test(text);
+}
+
+export function rufloIsVague(text: string): boolean {
+  const words = text.trim().split(/\s+/).length;
+  if (words > 30) return false;
+  const hasDetail = /\b(with|including|that has|should have|need a|featuring|color|colour|section|page|login|auth|dashboard|gallery|shop|cart|form|blog|portfolio|timeline|pricing|dark|light|modern|minimal|clean|bold|colorful|react|express|mongodb|firebase|api|realtime|animation)\b/i.test(text);
+  return !hasDetail;
+}
+
+export function rufloIsConfirmation(text: string): boolean {
+  return /^(yes|yeah|yep|yup|ok|okay|go|sure|build|start|do it|let'?s go|proceed|confirm|correct|right|great|perfect|absolutely|affirmative|build it|go ahead|start building|sounds good|looks good|fire|🔥|✅)/i.test(text.trim());
+}
+
+export function rufloIsChangeRequest(text: string): boolean {
+  return /\b(change|update|instead|rather|different|modify|use|add|remove|also|plus|but|however|no,|nope|actually|wait|hold on)\b/i.test(text);
+}
+
+export function rufloDetectTaskType(text: string): TaskType {
+  const l = text.toLowerCase();
+  if (/fix|debug|error|bug|issue|repair/.test(l)) return "fixing";
+  if (/build|create|implement|code|develop/.test(l)) return "coding";
+  if (/plan|architect|spec|blueprint/.test(l)) return "planning";
+  if (/ui|interface|frontend|layout/.test(l)) return "ui";
+  return "chat";
+}
+
+export function rufloDiscoveryQuestion(description: string): string {
+  const l = description.toLowerCase();
+  if (/coca.cola|pepsi|drink|beverage|food|restaurant|cafe|menu|delivery/.test(l))
+    return `Ohhh a ${description.trim()} — I can already picture how fire this is going to look! 🔥\n\nTell me more:\n• What sections? (Hero, gallery, history, contact?)\n• Vibe — bold classic, modern minimal, or premium?\n• Any specific brand colors?`;
+  if (/portfolio|cv|resume|personal brand/.test(l))
+    return `A personal portfolio — love this! 🚀\n\nQuick questions:\n• Sections needed? (Projects, skills, about, contact?)\n• Style — ultra-minimal, bold with animations, or editorial?\n• Any color palette or references?`;
+  if (/shop|store|ecommerce|sell|product|marketplace/.test(l))
+    return `An online store — this one's going to convert! 🛒\n\nLet me nail the details:\n• What kind of products? Physical, digital, or services?\n• Cart + checkout, or just a product catalog?\n• Style — clean/minimal, bold/colorful, luxury?`;
+  if (/dashboard|admin|analytics|tracking|crm|erp/.test(l))
+    return `A dashboard — I love building these! 📊\n\nTell me:\n• What data will it display? (Sales, users, real-time metrics?)\n• Charts, tables, or both?\n• Single-user tool or with auth?`;
+  if (/blog|news|article|content|magazine/.test(l))
+    return `A content platform — clean and slick! 📝\n\nDetails:\n• Topics/categories?\n• User comments, newsletter, or CMS editing?\n• Style vibe — editorial, tech-minimal, or magazine?`;
+  if (/bot|telegram|discord|slack|assistant/.test(l))
+    return `A custom bot — this is going to be wild! 🤖\n\nTell me:\n• What should it do? (Answer questions, book appointments, send alerts?)\n• Specific persona?\n• Commands or features in mind?`;
+  return `Wow, what an idea! I'm already excited 🔥\n\nA few quick things:\n• What specific pages or sections?\n• Style — bold and modern, clean and minimal?\n• Must-have features (login, payments, search)?`;
+}
+
+// ─── Ruflo Dispatch Result ─────────────────────────────────────────────────────
+
+export type RufloDispatchType =
+  | "image_ready"
+  | "image_error"
+  | "build_confirmed"
+  | "build_changed"
+  | "build_plan_ready"
+  | "build_discovery"
+  | "billing"
+  | "chat"
+  | "rate_limited";
+
+export interface RufloDispatchResult {
+  type: RufloDispatchType;
+  content: string;
+  imageUrl?: string;
+  imageBuffer?: Buffer;
+  plan?: PlanningResult;
+  description?: string;
+  tier?: string;
+  isElite?: boolean;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+}
+
+// ─── Ruflo Dispatch — single entry point driven through the persona matrix ─────
+// coreBot hands Telegram text here; Ruflo evaluates intent, routes through
+// OpenClaw's native execution skills, and returns a structured result.
+
+export async function rufloDispatch(
+  telegramId: number,
+  text: string,
+  tier: string,
+  onPlanReady?: (plan: PlanningResult, description: string, isElite: boolean) => void,
+): Promise<RufloDispatchResult> {
+
+  const isElite = tier === "elite";
+
+  // ── 1. Discovery state: user is answering Ruflo's clarifying question ────────
+  const discovery = rufloGetDiscovery(telegramId);
+  if (discovery) {
+    discovery.gathered.push(text);
+    rufloDeleteDiscovery(telegramId);
+    const fullDescription = [discovery.baseDescription, ...discovery.gathered].join(". ");
+    rufloAddHistory(telegramId, "user", `[Discovery answer: ${text.slice(0, 200)}]`);
+
+    const plan = await planningMode(
+      fullDescription,
+      (taskType, prompt, t, uid, sys) => routeTask(taskType as "planning", prompt, t ?? tier, uid, sys),
+      telegramId,
+      tier,
+    );
+
+    const planSummary = `🏗 *Architecture ready — ${plan.manifest.length} files mapped*\n\n*Stack:* ${plan.techStack}\n*Plan:* ${plan.summary}`;
+    rufloSetPending(telegramId, { description: fullDescription, plan, tier, isElite, expiresAt: rufloTtl() });
+    onPlanReady?.(plan, fullDescription, isElite);
+
+    return { type: "build_plan_ready", content: planSummary, plan, description: fullDescription, tier, isElite };
+  }
+
+  // ── 2. Pending confirmation: user is confirming or changing a pending build ──
+  const pending = rufloGetPending(telegramId);
+  if (pending) {
+    if (rufloIsConfirmation(text)) {
+      rufloDeletePending(telegramId);
+      return { type: "build_confirmed", content: "✅ *Building now — hold tight!* 🚀", plan: pending.plan, description: pending.description, tier: pending.tier, isElite: pending.isElite };
+    }
+    if (rufloIsChangeRequest(text)) {
+      rufloDeletePending(telegramId);
+      const newDesc = `${pending.description}. Changes: ${text}`;
+      const plan = await planningMode(
+        newDesc,
+        (taskType, prompt, t, uid, sys) => routeTask(taskType as "planning", prompt, t ?? tier, uid, sys),
+        telegramId,
+        tier,
+      );
+      const planSummary = `✏️ *Revised plan — ${plan.manifest.length} files*\n\n*Stack:* ${plan.techStack}\n*Plan:* ${plan.summary}`;
+      rufloSetPending(telegramId, { description: newDesc, plan, tier, isElite, expiresAt: rufloTtl() });
+      onPlanReady?.(plan, newDesc, isElite);
+      return { type: "build_changed", content: planSummary, plan, description: newDesc, tier, isElite };
+    }
+  }
+
+  // ── 3. Image intent: OpenClaw handles natively via generateImage skill ────────
+  if (rufloIsImageIntent(text)) {
+    const prompt = text
+      .replace(/^(create|generate|make|draw|design|produce|provision|show me|give me)\s+(me\s+)?(an?\s+)?/i, "")
+      .replace(/^(image|photo|picture|illustration|logo|banner|visual|artwork)\s+(of\s+)?/i, "")
+      .replace(/\b(image|photo|picture|illustration|artwork|visual)\s*$/i, "")
+      .trim() || text;
+
+    try {
+      const imageUrl = await generateImage(prompt, telegramId);
+      if (!imageUrl) throw new Error("No URL from image engine");
+
+      const axios = (await import("axios")).default;
+      const response = await axios.get<ArrayBuffer>(imageUrl, {
+        responseType: "arraybuffer",
+        timeout: 60_000,
+        headers: { "User-Agent": "WebForge/2.0" },
+      });
+
+      rufloAddHistory(telegramId, "user", `[Image: ${prompt.slice(0, 100)}]`);
+      return {
+        type: "image_ready",
+        content: `🎨 *Generated by WebForge AI*\n\n_"${prompt.slice(0, 180)}"_`,
+        imageBuffer: Buffer.from(response.data),
+        imageUrl,
+      };
+    } catch (err) {
+      logger.error({ err }, "rufloDispatch: image generation failed");
+      return { type: "image_error", content: `❌ Image generation hit a snag — try again in a moment!\n\nPrompt: "${text.slice(0, 80)}"` };
+    }
+  }
+
+  // ── 4. Build intent: trigger discovery if vague, else plan immediately ────────
+  if (rufloIsBuildIntent(text)) {
+    if (rufloIsVague(text)) {
+      const question = rufloDiscoveryQuestion(text);
+      rufloSetDiscovery(telegramId, { baseDescription: text, gathered: [], tier, expiresAt: rufloTtl() });
+      rufloAddHistory(telegramId, "user", `[Build intent: ${text.slice(0, 100)}]`);
+      return { type: "build_discovery", content: question };
+    }
+
+    rufloAddHistory(telegramId, "user", `[Build: ${text.slice(0, 100)}]`);
+    const plan = await planningMode(
+      text,
+      (taskType, prompt, t, uid, sys) => routeTask(taskType as "planning", prompt, t ?? tier, uid, sys),
+      telegramId,
+      tier,
+    );
+    const planSummary = `🏗 *Architecture mapped — ${plan.manifest.length} files*\n\n*Stack:* ${plan.techStack}\n*Plan:* ${plan.summary}`;
+    rufloSetPending(telegramId, { description: text, plan, tier, isElite, expiresAt: rufloTtl() });
+    onPlanReady?.(plan, text, isElite);
+    return { type: "build_plan_ready", content: planSummary, plan, description: text, tier, isElite };
+  }
+
+  // ── 5. Billing intent: Ruflo handles inline, no external billing handler ──────
+  if (rufloIsBillingIntent(text)) {
+    const billingContent = `💎 *WebForge Plans*\n\n*Starter* — Free\n10 daily actions, core builds & image gen\n\n*Pro* — ₦5,000/month\n150 actions, all models, priority queue\n\n*Elite* — ₦15,000/month\n500 actions, DeepBuild loops, GitHub sync\n\nUpgrade via @Webforgepaymentverificationbot`;
+    return { type: "billing", content: billingContent };
+  }
+
+  // ── 6. General chat: Ruflo responds in persona with conversation context ──────
+  const history = rufloGetHistory(telegramId);
+  const contextPrompt = history.length > 2
+    ? `[Conversation context:\n${history.slice(-6).map(h => `${h.role}: ${h.content}`).join("\n")}\n]\n\nLatest message: ${text}`
+    : text;
+
+  const taskType = rufloDetectTaskType(text);
+  const result = await routeTask(taskType, contextPrompt, tier, telegramId, RUFLO_PERSONA_MATRIX);
+
+  rufloAddHistory(telegramId, "user", text);
+  rufloAddHistory(telegramId, "assistant", result.content.slice(0, 500));
+
+  return {
+    type: "chat",
+    content: result.content,
+    model: result.model,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    costUsd: result.costUsd,
+  };
 }
 
 // ─── Semantic Code Splicer ────────────────────────────────────────────────────
