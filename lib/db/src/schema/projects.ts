@@ -6,6 +6,7 @@ export const projectsTable = pgTable("projects", {
   id: serial("id").primaryKey(),
   userId: bigint("user_id", { mode: "number" }).notNull(),
   name: text("name").notNull(),
+  slug: text("slug"),
   description: text("description"),
   status: text("status").notNull().default("idle"),
   port: integer("port"),

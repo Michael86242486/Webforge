@@ -42,8 +42,9 @@ export function assignProjectPort(projectId: number): number {
 
 // ─── Directory & File Ops ─────────────────────────────────────────────────────
 
-export async function ensureProjectDir(projectId: number, userId: number): Promise<string> {
-  const dir = path.join(PROJECTS_BASE_DIR, `user-${userId}`, `project-${projectId}`);
+export async function ensureProjectDir(projectId: number, userId: number, slug?: string): Promise<string> {
+  const dirName = slug ? `project-${slug}` : `project-${projectId}`;
+  const dir = path.join(PROJECTS_BASE_DIR, `user-${userId}`, dirName);
   await fs.mkdir(dir, { recursive: true });
   return dir;
 }
@@ -136,7 +137,7 @@ export async function spawnProjectApp(workDir: string, projectId: number, port: 
 
   const child = spawn("node", [entry], {
     cwd: workDir,
-    env: { ...process.env, PORT: String(port), NODE_ENV: "production" },
+    env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", BIND_HOST: "0.0.0.0", NODE_ENV: "production" },
     detached: true,
     stdio: ["ignore", outFd, errFd],
   });
