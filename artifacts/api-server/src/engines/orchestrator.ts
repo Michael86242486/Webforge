@@ -1,4 +1,5 @@
 import { exec, spawn } from "child_process";
+import type { ChildProcess } from "child_process";
 import { promisify } from "util";
 import net from "net";
 import fs from "fs/promises";
@@ -7,6 +8,7 @@ import path from "path";
 import { logger } from "../lib/logger.js";
 import { recordFileDiff } from "../utils/telemetry.js";
 import { routeTaskForModel, routeTask, generateImage, type TaskType } from "../ai/router.js";
+import chokidar from "chokidar";
 
 const execAsync = promisify(exec);
 
@@ -105,6 +107,203 @@ export function assignProjectPort(projectId: number): number {
   return PORT_RANGE_START + (projectId % 900);
 }
 
+// ─── Process Supervisor ───────────────────────────────────────────────────────
+// Tracks every spawned project process globally with in-memory log ring buffers.
+// Enables: live /logs access, auto-restart on crash, graceful hot-reload.
+
+const LOG_RING_SIZE = 500;
+
+interface SupervisedProcess {
+  child: ChildProcess | null;
+  port: number;
+  workDir: string;
+  projectId: number;
+  slug?: string;
+  logs: string[];
+  autoRestart: boolean;
+  restartCount: number;
+  status: "running" | "crashed" | "stopped" | "restarting";
+  watcher: ReturnType<typeof chokidar.watch> | null;
+  debounceTimer: NodeJS.Timeout | null;
+}
+
+const processRegistry = new Map<number, SupervisedProcess>();
+
+function appendLog(rec: SupervisedProcess, line: string): void {
+  const ts = new Date().toISOString().slice(11, 23);
+  rec.logs.push(`[${ts}] ${line}`);
+  if (rec.logs.length > LOG_RING_SIZE) rec.logs.splice(0, rec.logs.length - LOG_RING_SIZE);
+}
+
+export function getProjectLogs(projectId: number, lines = 80): string {
+  const rec = processRegistry.get(projectId);
+  if (!rec || rec.logs.length === 0) return "";
+  return rec.logs.slice(-lines).join("\n");
+}
+
+export function getSupervisedProcess(projectId: number): SupervisedProcess | undefined {
+  return processRegistry.get(projectId);
+}
+
+function spawnSupervisedChild(rec: SupervisedProcess): void {
+  const { workDir, projectId, port } = rec;
+
+  // Clear disk logs for fresh capture
+  try {
+    fsSync.writeFileSync(path.join(workDir, "app.stdout.log"), "");
+    fsSync.writeFileSync(path.join(workDir, "app.stderr.log"), "");
+  } catch { /* non-fatal */ }
+
+  const entry = path.join(workDir, "src/index.js");
+  const entryExists = fsSync.existsSync(entry);
+  const nodeEntry = entryExists ? "src/index.js" : "index.js";
+
+  const child = spawn("node", [nodeEntry], {
+    cwd: workDir,
+    env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", BIND_HOST: "0.0.0.0", NODE_ENV: "production" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  rec.child = child;
+  rec.status = "running";
+  appendLog(rec, `⚡ Process started (pid=${child.pid}, port=${port})`);
+
+  // Capture stdout
+  child.stdout?.on("data", (chunk: Buffer) => {
+    const lines = chunk.toString().split("\n").filter(Boolean);
+    for (const l of lines) {
+      appendLog(rec, `[stdout] ${l}`);
+      fsSync.appendFileSync(path.join(workDir, "app.stdout.log"), l + "\n");
+    }
+  });
+
+  // Capture stderr
+  child.stderr?.on("data", (chunk: Buffer) => {
+    const lines = chunk.toString().split("\n").filter(Boolean);
+    for (const l of lines) {
+      appendLog(rec, `[stderr] ${l}`);
+      fsSync.appendFileSync(path.join(workDir, "app.stderr.log"), l + "\n");
+    }
+  });
+
+  child.on("exit", (code, signal) => {
+    appendLog(rec, `🔴 Process exited (code=${code}, signal=${signal})`);
+    rec.status = "crashed";
+    logger.warn({ projectId, port, code, signal }, "Supervised process exited");
+
+    if (rec.autoRestart && rec.restartCount < 5) {
+      rec.restartCount++;
+      rec.status = "restarting";
+      appendLog(rec, `🔄 Auto-restart #${rec.restartCount} in 3s...`);
+      setTimeout(() => {
+        if (processRegistry.get(projectId) === rec) {
+          spawnSupervisedChild(rec);
+        }
+      }, 3000);
+    }
+  });
+
+  child.on("error", (err) => {
+    appendLog(rec, `❌ Spawn error: ${err.message}`);
+    logger.error({ projectId, err }, "Supervised process spawn error");
+  });
+
+  logger.info({ projectId, port, pid: child.pid }, "ProcessSupervisor: child spawned");
+}
+
+export function stopSupervisedProcess(projectId: number): void {
+  const rec = processRegistry.get(projectId);
+  if (!rec) return;
+  rec.autoRestart = false;
+  rec.status = "stopped";
+  if (rec.child) {
+    try { rec.child.kill("SIGTERM"); } catch { }
+    rec.child = null;
+  }
+}
+
+// ─── Hot-Reload File Watcher ──────────────────────────────────────────────────
+// Watches a project directory with chokidar. When any source file changes
+// (excludes node_modules and .git), the supervised process is gracefully
+// restarted without a full AI rebuild — instant hot-reload.
+
+export function watchProjectDir(workDir: string, projectId: number): void {
+  const rec = processRegistry.get(projectId);
+  if (!rec) { logger.warn({ projectId }, "watchProjectDir: no registry entry — call spawnProjectApp first"); return; }
+  if (rec.watcher) return; // already watching
+
+  const watcher = chokidar.watch(workDir, {
+    ignored: [/node_modules/, /\.git/, /\.log$/],
+    ignoreInitial: true,
+    persistent: true,
+    awaitWriteFinish: { stabilityThreshold: 400, pollInterval: 100 },
+  });
+
+  const triggerReload = (filePath: string) => {
+    if (rec.debounceTimer) clearTimeout(rec.debounceTimer);
+    rec.debounceTimer = setTimeout(async () => {
+      appendLog(rec, `📁 File changed: ${path.relative(workDir, filePath)} — hot-reloading...`);
+      logger.info({ projectId, filePath }, "Hot-reload: file changed, restarting process");
+
+      // Graceful restart: SIGTERM → wait → respawn
+      if (rec.child) {
+        try { rec.child.kill("SIGTERM"); } catch { }
+        rec.child = null;
+        await new Promise(r => setTimeout(r, 1200));
+      }
+      rec.restartCount = 0; // reset restart counter on intentional reload
+      spawnSupervisedChild(rec);
+    }, 500);
+  };
+
+  watcher.on("change", triggerReload);
+  watcher.on("add",    triggerReload);
+  rec.watcher = watcher;
+  appendLog(rec, `👁 File watcher active on ${workDir}`);
+  logger.info({ projectId, workDir }, "watchProjectDir: watcher started");
+}
+
+export function stopProjectWatcher(projectId: number): void {
+  const rec = processRegistry.get(projectId);
+  if (!rec?.watcher) return;
+  rec.watcher.close().catch(() => {});
+  rec.watcher = null;
+  appendLog(rec, "🛑 File watcher stopped");
+}
+
+// ─── Ground Truth Disk Scanner ────────────────────────────────────────────────
+// Reads the current project directory and produces a structured context block
+// that is injected into every AI generation prompt. This gives the model
+// ground-truth knowledge of what exists on disk BEFORE it writes new code.
+
+export async function scanWorkspaceDirContext(workDir: string): Promise<string> {
+  try {
+    let files: string[] = [];
+    try {
+      const entries = await fs.readdir(workDir, { recursive: true, withFileTypes: true });
+      files = entries
+        .filter(e => e.isFile() && !e.parentPath?.includes("node_modules") && !e.parentPath?.includes(".git") && !e.name.endsWith(".log"))
+        .map(e => path.relative(workDir, path.join(e.parentPath ?? workDir, e.name)))
+        .sort();
+    } catch { return ""; }
+
+    if (files.length === 0) return "";
+
+    let pkgCtx = "";
+    try {
+      const pkg = await fs.readFile(path.join(workDir, "package.json"), "utf8");
+      const parsed = JSON.parse(pkg) as { dependencies?: Record<string, string>; scripts?: Record<string, string> };
+      const deps = Object.keys(parsed.dependencies ?? {}).join(", ") || "none";
+      const scripts = Object.entries(parsed.scripts ?? {}).map(([k, v]) => `${k}: ${v}`).join(", ");
+      pkgCtx = `\nINSTALLED DEPS: ${deps}\nSCRIPTS: ${scripts}`;
+    } catch { /* no package.json yet */ }
+
+    return `EXISTING FILES ON DISK (${files.length} files):${pkgCtx}\n${files.map(f => `  - ${f}`).join("\n")}`;
+  } catch {
+    return "";
+  }
+}
+
 // ─── Directory & File Ops ─────────────────────────────────────────────────────
 
 export async function ensureProjectDir(projectId: number, userId: number, slug?: string): Promise<string> {
@@ -195,20 +394,41 @@ export async function detectEntryPoint(workDir: string): Promise<string> {
   return "index.js";
 }
 
-export async function spawnProjectApp(workDir: string, projectId: number, port: number): Promise<{ pid: number | undefined }> {
-  const entry = await detectEntryPoint(workDir);
-  const outFd = fsSync.openSync(path.join(workDir, "app.stdout.log"), "a");
-  const errFd = fsSync.openSync(path.join(workDir, "app.stderr.log"), "a");
+export async function spawnProjectApp(
+  workDir: string,
+  projectId: number,
+  port: number,
+  slug?: string,
+): Promise<{ pid: number | undefined }> {
+  // Kill any existing supervised process for this project
+  const existing = processRegistry.get(projectId);
+  if (existing?.child) {
+    try { existing.child.kill("SIGTERM"); } catch { }
+    existing.child = null;
+    await new Promise(r => setTimeout(r, 800));
+  }
 
-  const child = spawn("node", [entry], {
-    cwd: workDir,
-    env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", BIND_HOST: "0.0.0.0", NODE_ENV: "production" },
-    detached: true,
-    stdio: ["ignore", outFd, errFd],
-  });
-  child.unref();
-  logger.info({ projectId, port, entry, pid: child.pid }, "Project app spawned");
-  return { pid: child.pid };
+  // Build a fresh registry entry
+  const rec: SupervisedProcess = {
+    child: null,
+    port,
+    workDir,
+    projectId,
+    slug,
+    logs: [],
+    autoRestart: true,
+    restartCount: 0,
+    status: "running",
+    watcher: existing?.watcher ?? null, // keep existing watcher if any
+    debounceTimer: null,
+  };
+  processRegistry.set(projectId, rec);
+
+  appendLog(rec, `🚀 Launching project ${slug ?? projectId} on port ${port}`);
+  spawnSupervisedChild(rec);
+
+  logger.info({ projectId, port, slug, pid: rec.child?.pid }, "spawnProjectApp: supervised spawn registered");
+  return { pid: rec.child?.pid };
 }
 
 export async function pollAppHealth(port: number, maxMs = 90_000, intervalMs = 2_500): Promise<boolean> {
@@ -402,9 +622,16 @@ export async function planningMode(
   telegramId: number,
   tier: string,
 ): Promise<PlanningResult> {
-  const planPrompt = `You are planning a software project. Output ONLY valid JSON (no markdown fences, no prose).
+  const planPrompt = `You are a strict, defensive staff engineer architecting a software project. Output ONLY valid JSON (no markdown fences, no prose).
 
 User request: "${userPrompt}"
+
+DEFENSIVE ENGINEERING RULES (non-negotiable):
+- If the request contradicts a real architectural constraint (e.g. browser can't access a filesystem, a single-page app can't have a real database without a backend), do NOT attempt to write fake code. Instead, choose the correct architecture.
+- NEVER hallucinate package names. Only use well-known npm packages (express, cors, sqlite3, mongoose, jsonwebtoken, bcrypt, socket.io, dotenv, etc.)
+- If the user request is vague or contradictory, choose the simplest correct interpretation — not the most complex one.
+- ALL server files MUST use CommonJS (require/module.exports) — NEVER ES modules, NEVER TypeScript.
+- ALL server entry points MUST bind to 0.0.0.0 on process.env.PORT — no hardcoded ports, no localhost-only binding.
 
 JSON format:
 {
@@ -414,7 +641,7 @@ JSON format:
     { "path": "package.json", "description": "Node.js manifest with start script" },
     { "path": "src/index.js", "description": "Express server, listens on process.env.PORT" },
     { "path": "src/routes/api.js", "description": "REST API routes" },
-    { "path": "public/index.html", "description": "Main HTML page" },
+    { "path": "public/index.html", "description": "Main HTML page — use RELATIVE paths for all assets (not /style.css but style.css)" },
     { "path": "public/style.css", "description": "Styles" },
     { "path": "public/app.js", "description": "Frontend JavaScript" }
   ]
@@ -425,6 +652,7 @@ RULES:
 - package.json must have: { "scripts": { "start": "node src/index.js" } }
 - Server MUST bind to 0.0.0.0 explicitly: app.listen(PORT, '0.0.0.0', () => { ... })
 - Server must use process.env.PORT
+- ALL HTML files: use RELATIVE asset paths (href="style.css" NOT href="/style.css") so assets load correctly through the proxy
 - Target 8-14 files for a complete app
 - Return ONLY the JSON object — no markdown fences, no explanation before or after`;
 
@@ -765,9 +993,13 @@ export async function triBrainBuildFiles(
   const phaseErrors: string[] = [];
 
   const grokSystemPrompt =
-    "You are an elite full-stack developer building production-ready applications. " +
+    "You are a strict, defensive staff engineer building production-ready applications. " +
     "Write COMPLETE, working code — never truncate, never use TODO/FIXME/placeholder comments, never write stubs. " +
     "Every file must be 100% functional. Use CommonJS (require/module.exports) for all .js files. " +
+    "DEFENSIVE RULES: (1) If a require() call names a package not in package.json, do NOT use it — use only packages already listed. " +
+    "(2) NEVER use ES module syntax (import/export) in .js files — CommonJS only. " +
+    "(3) Server entry points MUST use: const PORT = process.env.PORT || 3000; app.listen(PORT, '0.0.0.0'). " +
+    "(4) HTML files: use RELATIVE asset paths (href=\"style.css\" NOT href=\"/style.css\"). " +
     "Apply beautiful design: gradients, animations, responsive layouts, glassmorphism, real content.";
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -800,29 +1032,41 @@ export async function triBrainBuildFiles(
     "You are an elite frontend UI engineer specialising in retro-neon web design. " +
     "Write COMPLETE, visually stunning HTML/CSS/JavaScript — no truncation, no TODOs, no stubs. " +
     "Use neon accents, glassmorphism cards, smooth animations, and responsive grids. " +
-    "All .js files use CommonJS (require/module.exports). Make it beautiful and production-ready.";
+    "All .js files use CommonJS (require/module.exports). Make it beautiful and production-ready. " +
+    "CRITICAL: Use RELATIVE asset paths (href=\"style.css\" NOT href=\"/style.css\", src=\"app.js\" NOT src=\"/app.js\"). " +
+    "Absolute paths starting with / break when served through a proxy — always use relative paths.";
 
-  const buildPrompt = (file: FilePlan, pkgCtx?: string): string =>
+  const buildPrompt = (file: FilePlan, pkgCtx?: string, diskContext?: string): string =>
     `Write the COMPLETE source code for ONE specific file in a web application.\n\n` +
     `PROJECT: "${projectDescription}"\n` +
     `TECH STACK: ${plan.techStack}\n` +
     `COLOR SCHEME: ${colorScheme}\n` +
     `DESIGN SYSTEM: ${designSystem}\n` +
     (pkgCtx ? `\nPACKAGE.JSON (use ONLY these deps — no new requires):\n${pkgCtx.slice(0, 600)}\n` : "") +
+    (diskContext ? `\nGROUND TRUTH — WHAT ALREADY EXISTS ON DISK (read this before writing):\n${diskContext.slice(0, 800)}\n` : "") +
     `\nALL PROJECT FILES (context — do NOT write these):\n${fileIndex}\n\n` +
     `YOUR FILE TO WRITE:\n` +
     `  PATH: ${file.path}\n` +
     `  PURPOSE: ${file.description}\n\n` +
-    `MANDATORY RULES:\n` +
+    `MANDATORY RULES (DEFENSIVE ENGINEERING — NON-NEGOTIABLE):\n` +
     `- Return ONLY raw file content — zero markdown fences, zero explanation\n` +
-    `- CommonJS ONLY for .js files (require/module.exports) — never use import/export\n` +
+    `- CommonJS ONLY for .js files (require/module.exports) — never use import/export, never use ES modules\n` +
+    `- NEVER require() a package not listed in the PACKAGE.JSON above — only use what's installed\n` +
     `- Server .js files MUST include: const PORT = process.env.PORT || 3000; and app.listen(PORT, '0.0.0.0')\n` +
     `- HTML: complete DOCTYPE, beautiful themed UI matching the color scheme above, linked CSS + JS\n` +
+    `- HTML asset paths: RELATIVE only (href="style.css" NOT href="/style.css") — absolute paths break the proxy\n` +
     `- CSS: minimum 80 lines — gradients, animations, hover states, flex/grid responsive layout\n` +
     `- package.json: "scripts":{"start":"node src/index.js"} and ALL required npm package names\n` +
     `- NEVER write placeholders, skeleton code, "// fill in later", "// TODO", or truncated blocks\n` +
     `- Apply the COLOR SCHEME and DESIGN SYSTEM to all visual output — make it beautiful\n` +
     `- Complex files (JS/HTML/CSS): minimum 60 lines of real, working code`;
+
+  // ── Scan existing disk state for ground truth context (pre-flight) ─────────
+  let diskContext: string | undefined;
+  try {
+    diskContext = await scanWorkspaceDirContext(workDir);
+    if (diskContext) console.log(`[TriBrain] 🗂️ Ground truth scan: ${diskContext.split("\n").length} lines`);
+  } catch { /* non-fatal */ }
 
   // ── Per-file generator with integrity gate + Dev-X audit ──────────────────
   // Model selection is determined by classifyFile() before this is called,
@@ -844,7 +1088,7 @@ export async function triBrainBuildFiles(
 
     // Phase 2: Primary generation — model is Grok-3 (backend) or Mistral (frontend)
     try {
-      const result = await routeTaskForModel(model, buildPrompt(file, pkgCtx), sysPrompt, telegramId, maxToks);
+      const result = await routeTaskForModel(model, buildPrompt(file, pkgCtx, diskContext), sysPrompt, telegramId, maxToks);
       content = stripFences(result.content);
       costUsd += result.costUsd;
       console.log(`[TriBrain] ✓ ${model}[${lane}] → ${file.path} (${content.length} chars)`);

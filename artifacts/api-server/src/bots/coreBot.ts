@@ -15,6 +15,7 @@ import {
   assignProjectPort, findFreePort, syntaxAuditFiles, patchSyntaxError,
   generateReadme, gitCloneRepo, gitPushChanges, selfHealApp,
   triBrainBuildFiles,
+  watchProjectDir, stopProjectWatcher, getProjectLogs, stopSupervisedProcess,
   RUFLO_PERSONA_MATRIX,
   rufloDispatch, rufloDeleteDiscovery, rufloDeletePending,
   rufloGetPending, rufloAddHistory,
@@ -326,8 +327,10 @@ async function runFullBuild(
     const port = await findFreePort(preferred);
     broadcastProgress(pid, 88, `Starting on port ${port}...`, written, plan.manifest.length);
 
-    const { pid: procPid } = await spawnProjectApp(workDir, project.id, port);
+    const { pid: procPid } = await spawnProjectApp(workDir, project.id, port, projectKey);
     await db.update(projectsTable).set({ port, botPid: procPid ?? null }).where(eq(projectsTable.id, project.id));
+    // Start hot-reload file watcher for this project
+    watchProjectDir(workDir, project.id);
 
     await safeSend(bot, chatId, `⏳ *App starting on port ${port}...* (10-30s)`, { parse_mode: "Markdown" });
 
@@ -474,20 +477,24 @@ async function handleLogs(msg: TelegramBot.Message, projectId: number): Promise<
 
   const workDir = path.join(process.cwd(), "user-projects", String(projectId));
 
-  let stdoutLines: string[] = [];
-  let stderrLines: string[] = [];
-
-  try {
-    const raw = await fs.readFile(path.join(workDir, "app.stdout.log"), "utf8");
-    stdoutLines = raw.trim().split("\n").filter(Boolean).slice(-50);
-  } catch { stdoutLines = ["(no stdout log)"]; }
-
-  try {
-    const raw = await fs.readFile(path.join(workDir, "app.stderr.log"), "utf8");
-    stderrLines = raw.trim().split("\n").filter(Boolean).slice(-20);
-  } catch { stderrLines = ["(no stderr log)"]; }
-
-  const combined = `${stdoutLines.join("\n")}\n\n--- STDERR ---\n${stderrLines.join("\n")}`;
+  // Prefer in-memory ring buffer (ProcessSupervisor), fall back to disk logs
+  let combined = "";
+  const inMemory = getProjectLogs(projectId, 200);
+  if (inMemory.length > 0) {
+    combined = inMemory.join("\n");
+  } else {
+    let stdoutLines: string[] = [];
+    let stderrLines: string[] = [];
+    try {
+      const raw = await fs.readFile(path.join(workDir, "app.stdout.log"), "utf8");
+      stdoutLines = raw.trim().split("\n").filter(Boolean).slice(-50);
+    } catch { stdoutLines = ["(no stdout log)"]; }
+    try {
+      const raw = await fs.readFile(path.join(workDir, "app.stderr.log"), "utf8");
+      stderrLines = raw.trim().split("\n").filter(Boolean).slice(-20);
+    } catch { stderrLines = ["(no stderr log)"]; }
+    combined = `${stdoutLines.join("\n")}\n\n--- STDERR ---\n${stderrLines.join("\n")}`;
+  }
   const truncated = combined.length > 3000 ? combined.slice(-3000) : combined;
 
   await safeSend(bot, msg.chat.id,
@@ -628,8 +635,9 @@ async function handleRestart(msg: TelegramBot.Message, projectId: number): Promi
   try {
     const preferred = proj.port ?? assignProjectPort(projectId);
     const port = await findFreePort(preferred);
-    const { pid: newPid } = await spawnProjectApp(proj.workDir, projectId, port);
+    const { pid: newPid } = await spawnProjectApp(proj.workDir, projectId, port, proj.slug ?? undefined);
     await db.update(projectsTable).set({ port, botPid: newPid ?? null, status: "running" }).where(eq(projectsTable.id, projectId));
+    watchProjectDir(proj.workDir, projectId);
 
     await safeSend(bot, chatId, `⏳ Polling port ${port} for HTTP response...`);
     const live = await pollAppHealth(port, 60_000);
@@ -754,8 +762,9 @@ async function handleCloneRepo(msg: TelegramBot.Message, repoUrl: string): Promi
     const preferred = assignProjectPort(proj.id);
     const port = await findFreePort(preferred);
     await runTerminalCommand("npm install --legacy-peer-deps 2>&1 || yarn install 2>&1", workDir, 180_000);
-    const { pid: p2 } = await spawnProjectApp(workDir, proj.id, port);
+    const { pid: p2 } = await spawnProjectApp(workDir, proj.id, port, proj.slug ?? undefined);
     await db.update(projectsTable).set({ port, botPid: p2 ?? null, status: "running" }).where(eq(projectsTable.id, proj.id));
+    watchProjectDir(workDir, proj.id);
     const live = await pollAppHealth(port, 60_000);
     const cloneKey = proj.slug ?? String(proj.id);
     const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${cloneKey}/`;
