@@ -109,11 +109,12 @@ export async function routeTask(
   const candidates = modelsForTier(taskType, tier);
   let lastErr: unknown;
 
-  // Task-type token budgets — planning and coding need large outputs to avoid truncation
+  // Task-type token budgets — larger windows reduce truncation dramatically
   const maxTokens: number | undefined =
-    taskType === "planning" ? 4096 :
-    taskType === "coding"   ? 8192 :
-    taskType === "fixing"   ? 4096 :
+    taskType === "planning" ? 8192  :
+    taskType === "coding"   ? 16384 :
+    taskType === "fixing"   ? 8192  :
+    taskType === "ui"       ? 8192  :
     undefined;
 
   for (const model of candidates) {

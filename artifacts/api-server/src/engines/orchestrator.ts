@@ -697,124 +697,231 @@ export async function triBrainBuildFiles(
   const phaseErrors: string[] = [];
 
   const grokSystemPrompt =
-    "You are an expert full-stack developer. Write complete, production-ready code. " +
-    "Never truncate output, never use TODO comments, never write placeholder stubs. " +
-    "Every file must be 100% functional and complete.";
+    "You are an elite full-stack developer building production-ready applications. " +
+    "Write COMPLETE, working code — never truncate, never use TODO/FIXME/placeholder comments, never write stubs. " +
+    "Every file must be 100% functional. Use CommonJS (require/module.exports) for all .js files. " +
+    "Apply beautiful design: gradients, animations, responsive layouts, glassmorphism, real content.";
 
-  for (let i = 0; i < manifest.length; i++) {
-    const file = manifest[i];
-    const isShortFile = /\.(md|env|gitignore|txt)$/i.test(file.path);
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const isSimpleFile = (p: string) => /\.(md|gitignore|env|txt)$/i.test(p);
+  const isComplexFile = (p: string) => /\.(js|ts|mjs|cjs|jsx|tsx|html)$/i.test(p);
 
-    // ── Phase 2: Grok-3 per-file code synthesis ───────────────────────────
-    console.log(`[TriBrain] 🧠 Grok-3 → ${file.path} (${i + 1}/${manifest.length})`);
+  const stripFences = (s: string) =>
+    s.replace(/^```[\w\s]*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
 
-    const grokPrompt =
-      `Write the COMPLETE source code for one specific file in a web application.\n\n` +
-      `PROJECT: "${projectDescription}"\n` +
-      `TECH STACK: ${plan.techStack}\n` +
-      `COLOR SCHEME: ${colorScheme}\n` +
-      `DESIGN SYSTEM: ${designSystem}\n\n` +
-      `ALL FILES IN THIS PROJECT (context only — do NOT write these):\n${fileIndex}\n\n` +
-      `YOUR FILE TO WRITE:\n` +
-      `  PATH: ${file.path}\n` +
-      `  PURPOSE: ${file.description}\n\n` +
-      `MANDATORY RULES:\n` +
-      `- Return ONLY raw file content — zero markdown fences, zero explanation, zero headers\n` +
-      `- CommonJS ONLY for .js files (require/module.exports) — never use import/export\n` +
-      `- Server .js files MUST include: const PORT = process.env.PORT || 3000;\n` +
-      `- HTML files: complete DOCTYPE, beautiful inline or linked CSS, working JS\n` +
-      `- CSS files: minimum 60 lines of real styles — gradients, transitions, hover effects, responsive grid\n` +
-      `- package.json: must have "scripts": { "start": "node src/index.js" } and all needed dependencies\n` +
-      `- NEVER write placeholder text, skeleton code, or "// fill in later"\n` +
-      `- Apply the COLOR SCHEME and DESIGN SYSTEM to all visual output (HTML/CSS)\n` +
-      `- Minimum 30 lines of working code`;
+  const buildPrompt = (file: FilePlan, pkgCtx?: string): string =>
+    `Write the COMPLETE source code for ONE specific file in a web application.\n\n` +
+    `PROJECT: "${projectDescription}"\n` +
+    `TECH STACK: ${plan.techStack}\n` +
+    `COLOR SCHEME: ${colorScheme}\n` +
+    `DESIGN SYSTEM: ${designSystem}\n` +
+    (pkgCtx ? `\nPACKAGE.JSON (use ONLY these deps — no new requires):\n${pkgCtx.slice(0, 600)}\n` : "") +
+    `\nALL PROJECT FILES (context — do NOT write these):\n${fileIndex}\n\n` +
+    `YOUR FILE TO WRITE:\n` +
+    `  PATH: ${file.path}\n` +
+    `  PURPOSE: ${file.description}\n\n` +
+    `MANDATORY RULES:\n` +
+    `- Return ONLY raw file content — zero markdown fences, zero explanation\n` +
+    `- CommonJS ONLY for .js files (require/module.exports) — never use import/export\n` +
+    `- Server .js files MUST include: const PORT = process.env.PORT || 3000;\n` +
+    `- HTML: complete DOCTYPE, beautiful themed UI matching the color scheme above, linked CSS + JS\n` +
+    `- CSS: minimum 80 lines — gradients, animations, hover states, flex/grid responsive layout\n` +
+    `- package.json: "scripts":{"start":"node src/index.js"} and ALL required npm package names\n` +
+    `- NEVER write placeholders, skeleton code, "// fill in later", "// TODO", or truncated blocks\n` +
+    `- Apply the COLOR SCHEME and DESIGN SYSTEM to all visual output — make it beautiful\n` +
+    `- Complex files (JS/HTML/CSS): minimum 60 lines of real, working code`;
 
+  // ── Per-file generator with integrity gate + Dev-X audit ──────────────────
+  const generateFile = async (
+    file: FilePlan,
+    pkgCtx?: string,
+  ): Promise<{ content: string; costUsd: number; phase: string }> => {
+    const simple = isSimpleFile(file.path);
+    const complex = isComplexFile(file.path);
+    const model = simple ? "grok-3-mini" : "grok-3";
+    const maxToks = simple ? 2048 : complex ? 16384 : 8192;
+    let phase = simple ? "Grok-mini" : "Grok-3";
     let content = "";
+    let costUsd = 0;
+
+    // Phase 2: Primary generation
     try {
-      const grokResult = await routeTaskForModel("grok-3", grokPrompt, grokSystemPrompt, telegramId, 8192);
-      content = grokResult.content
-        .replace(/^```[\w\s]*\n?/m, "")
-        .replace(/\n?```\s*$/m, "")
-        .trim();
-      totalCostUsd += grokResult.costUsd;
-      console.log(`[TriBrain] ✓ Grok-3 wrote ${content.length} chars for ${file.path}`);
-    } catch (grokErr) {
-      const errMsg = `Grok-3 failed for ${file.path}: ${String(grokErr).slice(0, 120)}`;
-      phaseErrors.push(errMsg);
-      logger.warn({ file: file.path, err: grokErr }, "triBrainBuildFiles: Grok-3 error");
+      const result = await routeTaskForModel(model, buildPrompt(file, pkgCtx), grokSystemPrompt, telegramId, maxToks);
+      content = stripFences(result.content);
+      costUsd += result.costUsd;
+      console.log(`[TriBrain] ✓ ${model} → ${file.path} (${content.length} chars)`);
+    } catch (err) {
+      phaseErrors.push(`${model} failed for ${file.path}: ${String(err).slice(0, 100)}`);
+      logger.warn({ file: file.path, err }, "triBrainBuildFiles: primary generation failed");
       content = generateStubContent(file.path, file.description, plan.techStack);
+      phase = "stub";
     }
 
-    // ── Integrity gate ────────────────────────────────────────────────────
-    if (!isShortFile && content.trim().length < 80) {
-      console.log(`[TriBrain] ❌ Integrity fail for ${file.path} (${content.length} chars) — escalating to Dev-X`);
-      const repairPrompt =
-        `The file "${file.path}" is critically incomplete. ` +
-        `Write complete, production-ready source code for it now.\n\n` +
-        `FILE PURPOSE: ${file.description}\n` +
-        `PROJECT: "${projectDescription}"\n` +
-        `TECH STACK: ${plan.techStack}\n\n` +
-        `Return ONLY the complete file content. No markdown, no explanation.`;
+    // Integrity gate: escalate to Dev-X if content is too thin
+    if (!simple && content.trim().length < 80) {
+      console.log(`[TriBrain] ❌ Integrity fail ${file.path} (${content.length} chars) → Dev-X repair`);
       try {
-        const repairResult = await routeTaskForModel("dev-x", repairPrompt, grokSystemPrompt, telegramId, 8192);
-        const repaired = repairResult.content
-          .replace(/^```[\w\s]*\n?/m, "")
-          .replace(/\n?```\s*$/m, "")
-          .trim();
+        const repairPrompt =
+          `The file "${file.path}" is critically incomplete. Write COMPLETE production-ready code now.\n\n` +
+          `PURPOSE: ${file.description}\nPROJECT: "${projectDescription}"\nSTACK: ${plan.techStack}\n\n` +
+          `Return ONLY the file content. No markdown.`;
+        const repair = await routeTaskForModel("dev-x", repairPrompt, grokSystemPrompt, telegramId, 8192);
+        const repaired = stripFences(repair.content);
         if (repaired.length > content.length) {
           content = repaired;
-          totalCostUsd += repairResult.costUsd;
-          console.log(`[TriBrain] 🔧 Dev-X integrity repair → ${repaired.length} chars for ${file.path}`);
+          costUsd += repair.costUsd;
+          phase = "Dev-X-repair";
+          console.log(`[TriBrain] 🔧 Dev-X repaired ${file.path} → ${repaired.length} chars`);
         }
       } catch (repairErr) {
         phaseErrors.push(`Dev-X repair failed for ${file.path}: ${String(repairErr).slice(0, 80)}`);
       }
     }
 
-    // ── Phase 3: Dev-X pre-flight syntax audit (JS/TS files only) ────────
-    const needsAudit = /\.(js|ts|mjs|cjs)$/i.test(file.path) && content.trim().length > 100;
-    let phase = "Grok-3";
-    if (needsAudit) {
-      const auditPrompt =
-        `You are a JavaScript/TypeScript syntax auditor. Review the file below for syntax errors: ` +
-        `unclosed strings, missing closing braces/brackets, truncated code, undefined variables. ` +
-        `Fix any issues and return the COMPLETE corrected file.\n\n` +
-        `FILE: ${file.path}\n\n` +
-        `RULES:\n` +
-        `- Return ONLY the complete corrected file content — no markdown, no explanation\n` +
-        `- If the code is already correct, return it unchanged\n` +
-        `- Never shorten or summarize — return the full file\n\n` +
-        `CODE:\n${content}`;
+    // Phase 3: Dev-X parallel syntax audit for JS/TS/HTML files
+    if (complex && content.trim().length > 100) {
       try {
-        const auditResult = await routeTaskForModel("dev-x", auditPrompt, undefined, telegramId, 8192);
-        const audited = auditResult.content
-          .replace(/^```[\w\s]*\n?/m, "")
-          .replace(/\n?```\s*$/m, "")
-          .trim();
-        // Only use Dev-X output if sanity check passes (not significantly shorter)
+        const auditPrompt =
+          `You are a JavaScript/TypeScript syntax auditor. Review for: unclosed strings, missing braces/brackets, ` +
+          `truncated code, undefined references, broken CommonJS syntax. Fix all issues.\n\n` +
+          `FILE: ${file.path}\nRULES: Return ONLY the complete corrected file — no markdown, no explanation.\n\n` +
+          `CODE:\n${content}`;
+        const audit = await routeTaskForModel("dev-x", auditPrompt, undefined, telegramId, 12288);
+        const audited = stripFences(audit.content);
         if (audited.length >= content.length * 0.75 && audited.length > 50) {
           content = audited;
-          totalCostUsd += auditResult.costUsd;
-          phase = "Grok-3 + Dev-X";
+          costUsd += audit.costUsd;
+          phase = phase === "stub" ? "Dev-X" : `${phase}+Dev-X`;
           console.log(`[TriBrain] 🛡️ Dev-X audited ${file.path} → ${audited.length} chars`);
         }
       } catch (auditErr) {
-        // Silent — keep Grok-3 output; audit failure is non-fatal
-        logger.warn({ file: file.path, err: auditErr }, "triBrainBuildFiles: Dev-X audit failed (non-fatal)");
+        logger.warn({ file: file.path, err: auditErr }, "triBrainBuildFiles: Dev-X audit skipped (non-fatal)");
       }
     }
 
-    // ── Write to disk ─────────────────────────────────────────────────────
-    const absPath = path.join(workDir, file.path);
+    return { content, costUsd, phase };
+  };
+
+  // ── Step 1: Generate package.json first (gives dep context to all other files) ──
+  let pkgJsonContent: string | undefined;
+  const pkgFile = manifest.find(f => f.path === "package.json");
+  if (pkgFile) {
+    console.log(`[TriBrain] 📦 Step 1 — Generating package.json first for dependency context...`);
+    const { content, costUsd, phase } = await generateFile(pkgFile);
+    pkgJsonContent = content;
+    totalCostUsd += costUsd;
+    const absPath = path.join(workDir, pkgFile.path);
     await fs.mkdir(path.dirname(absPath), { recursive: true });
     await fs.writeFile(absPath, content, "utf8");
-    recordFileDiff(String(telegramId), file.path, content).catch(() => {});
+    recordFileDiff(String(telegramId), pkgFile.path, content);
     written++;
-    onFileWritten(written, manifest.length, file.path, phase);
-    console.log(`[TriBrain] ✅ ${written}/${manifest.length} — ${file.path} (${content.length} chars) [${phase}]`);
+    onFileWritten(written, manifest.length, pkgFile.path, phase);
+    console.log(`[TriBrain] ✅ package.json ready — ${content.length} chars [${phase}]`);
+  }
+
+  // ── Step 2: Generate all remaining files in parallel batches of 5 ─────────
+  const remaining = manifest.filter(f => f.path !== "package.json");
+  const BATCH_SIZE = 5;
+  const totalFiles = manifest.length;
+
+  for (let batchStart = 0; batchStart < remaining.length; batchStart += BATCH_SIZE) {
+    const batch = remaining.slice(batchStart, batchStart + BATCH_SIZE);
+    const batchNum = Math.floor(batchStart / BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(remaining.length / BATCH_SIZE);
+    console.log(`[TriBrain] 🚀 Step 2 — Parallel batch ${batchNum}/${totalBatches}: [${batch.map(f => f.path).join(", ")}]`);
+
+    // Generate all files in batch simultaneously
+    const results = await Promise.allSettled(
+      batch.map(file => generateFile(file, pkgJsonContent))
+    );
+
+    // Write all files in batch to disk simultaneously
+    const writeOps = results.map(async (result, i) => {
+      const file = batch[i]!;
+      let content: string;
+      let costUsd = 0;
+      let phase = "stub";
+
+      if (result.status === "fulfilled") {
+        ({ content, costUsd, phase } = result.value);
+      } else {
+        phaseErrors.push(`Batch generation failed for ${file.path}: ${String(result.reason).slice(0, 80)}`);
+        content = generateStubContent(file.path, file.description, plan.techStack);
+        console.log(`[TriBrain] ⚠️ Fallback stub for ${file.path}`);
+      }
+
+      totalCostUsd += costUsd;
+      const absPath = path.join(workDir, file.path);
+      await fs.mkdir(path.dirname(absPath), { recursive: true });
+      await fs.writeFile(absPath, content, "utf8");
+      recordFileDiff(String(telegramId), file.path, content);
+      return { file, content, phase };
+    });
+
+    const batchWritten = await Promise.allSettled(writeOps);
+
+    // Update written count and fire progress callbacks
+    batchWritten.forEach((r, i) => {
+      written++;
+      const file = batch[i]!;
+      const phase = r.status === "fulfilled" ? r.value.phase : "error";
+      onFileWritten(written, totalFiles, file.path, phase);
+      if (r.status === "fulfilled") {
+        console.log(`[TriBrain] ✅ ${written}/${totalFiles} — ${file.path} [${phase}]`);
+      }
+    });
+  }
+
+  // ── Step 3: Smart dependency enrichment — scan all JS, patch package.json ──
+  try {
+    const jsFiles = manifest.filter(f => /\.js$/i.test(f.path) && f.path !== "package.json");
+    const allPkgs = new Set<string>();
+    for (const f of jsFiles) {
+      try {
+        const code = await fs.readFile(path.join(workDir, f.path), "utf8").catch(() => "");
+        for (const pkg of extractRequiredPackages(code)) allPkgs.add(pkg);
+      } catch { /* non-fatal */ }
+    }
+
+    if (allPkgs.size > 0) {
+      const knownVersions: Record<string, string> = {
+        express: "^4.18.2", cors: "^2.8.5", dotenv: "^16.3.1",
+        mongoose: "^7.6.3", pg: "^8.11.3", sqlite3: "^5.1.6",
+        bcrypt: "^5.1.1", bcryptjs: "^2.4.3", jsonwebtoken: "^9.0.2",
+        multer: "^1.4.5-lts.1", axios: "^1.6.2", nodemailer: "^6.9.7",
+        "socket.io": "^4.6.2", uuid: "^9.0.0", "express-session": "^1.17.3",
+        "express-validator": "^7.0.1", morgan: "^1.10.0", helmet: "^7.1.0",
+        compression: "^1.7.4", "cookie-parser": "^1.4.6", joi: "^17.11.0",
+        zod: "^3.22.4", lodash: "^4.17.21", moment: "^2.29.4", dayjs: "^1.11.10",
+        stripe: "^14.8.0", ejs: "^3.1.9", handlebars: "^4.7.8",
+        "node-cron": "^3.0.3", "ws": "^8.16.0", "rate-limiter-flexible": "^4.0.1",
+      };
+      const pkgPath = path.join(workDir, "package.json");
+      try {
+        const existing = JSON.parse(await fs.readFile(pkgPath, "utf8").catch(() => "{}"));
+        existing.dependencies = existing.dependencies ?? {};
+        existing.scripts = existing.scripts ?? { start: "node src/index.js" };
+        let enriched = 0;
+        for (const pkg of allPkgs) {
+          if (!existing.dependencies[pkg]) {
+            existing.dependencies[pkg] = knownVersions[pkg] ?? "latest";
+            enriched++;
+          }
+        }
+        if (enriched > 0) {
+          await fs.writeFile(pkgPath, JSON.stringify(existing, null, 2), "utf8");
+          console.log(`[TriBrain] 📦 package.json enriched with ${enriched} auto-detected packages: ${[...allPkgs].join(", ")}`);
+        }
+      } catch (pkgErr) {
+        logger.warn({ pkgErr }, "TriBrain: package.json enrichment failed (non-fatal)");
+      }
+    }
+  } catch (depErr) {
+    logger.warn({ depErr }, "TriBrain: smart dep extraction failed (non-fatal)");
   }
 
   logger.info({ written, totalCostUsd, errors: phaseErrors.length }, "triBrainBuildFiles: complete");
+  console.log(`[TriBrain] 🏁 Complete — ${written} files, $${totalCostUsd.toFixed(4)}, ${phaseErrors.length} errors`);
   return { written, totalCostUsd, phaseErrors };
 }
 
@@ -1126,25 +1233,38 @@ Rules: CommonJS only, use process.env.PORT, fix the exact crash — do not chang
 
 // ─── Ruflo Persona Matrix (single source of truth for identity + tier rules) ──
 
-export const RUFLO_PERSONA_MATRIX = `You are WebForge — an elite autonomous AI co-founder and full-stack PaaS engine on Telegram.
+export const RUFLO_PERSONA_MATRIX = `You are WebForge — the world's most advanced autonomous AI co-founder and full-stack PaaS engine, operating natively on Telegram.
 
-IDENTITY (non-negotiable):
-• ALWAYS respond in English only — if the user writes another language, reply: "WebForge operates in English. What shall we build?"
-• You are NOT a generic chatbot. You are a build engine. Never give AWS/Docker/cloud textbook advice.
-• Never reveal model names, provider names, or internal architecture. If asked: "I'm WebForge — proprietary intelligence."
-• Be warm, excited, and technically precise. Sound like a senior engineer who loves shipping products.
-• Never say "How can I help?" as a standalone. Always redirect to building.
+IDENTITY (absolute, non-negotiable):
+• ALWAYS respond in English only — if the user writes in any other language: "WebForge operates in English only. Tell me what to build."
+• You are NOT a chatbot. You are a DEPLOYMENT ENGINE. Never give generic cloud/AWS/Docker/DevOps advice.
+• Never reveal model names, providers, or internal architecture. If asked: "I'm WebForge — proprietary autonomous intelligence."
+• Be warm, confident, slightly intense — like a senior engineer who ships at midnight because they love it.
+• Never open with "How can I help?" — always pivot hard to building. Make the user excited to ship.
+• You build real, live apps. Not prototypes. Not mockups. Production-grade, deployed, accessible via URL.
+• When users describe an idea — match their energy and elevate it. Make them feel like it's already shipping.
 
-Platform identity: WebForge Engine v2 — autonomous full-stack builder, image generator, GitHub sync engine, bot host.
+PLATFORM IDENTITY: WebForge Engine v3 — Tri-Brain autonomous builder (Mistral architect → Grok-3 synthesizer → Dev-X auditor), AI image forge, GitHub sync engine, live sandbox host, Telegram bot deployer.
 
-Tiers:
-• Starter — Free, 10 daily actions. Core build + image generation.
-• Pro — ₦5,000/month, 150 daily actions. All models, priority queue.
-• Elite — ₦15,000/month, 500 daily actions + DeepBuild loops + GitHub sync.
+TIERS:
+• Starter — Free. 10 daily actions. Core Tri-Brain builds + Pollinations image forge.
+• Pro — ₦5,000/month. 150 daily actions. All models, priority build queue, concurrent builds.
+• Elite — ₦15,000/month. 500 daily actions. DeepBuild loops (5 rounds), GitHub auto-sync, batch builds (5 concurrent), custom AI personas.
 
-Capabilities: full-stack web apps, REST APIs, Telegram bots, AI image generation, GitHub push/clone, live sandbox hosting.
+CAPABILITIES (what you can actually deploy right now):
+• Full-stack web apps: Express + HTML/CSS/JS, EJS templates, REST APIs, SQLite/Postgres backends
+• E-commerce stores, dashboards, portfolios, landing pages, SaaS tools, booking systems
+• Telegram bots: polling, webhooks, custom commands, AI-powered persona bots
+• AI image generation: Pollinations engine, custom prompts, any style/size
+• GitHub: clone repos, push builds, auto-commit on every change
+• Live sandbox: every app runs at a real HTTPS URL instantly after build
 
-CRITICAL: Keep chat responses concise — under 800 characters. No bullet-point walls.`;
+RESPONSE STYLE:
+• Concise and punchy — under 700 characters per reply
+• No bullet-point walls in chat — use short paragraphs or 2-3 bullets max
+• Sound like a founder demoing to investors — confident, specific, action-forward
+• Always end conversational replies with a clear next action or question`;
+
 
 // ─── Session State (owned by Ruflo / orchestrator, not by the entry bot) ──────
 
