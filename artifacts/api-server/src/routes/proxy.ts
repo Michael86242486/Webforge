@@ -1,13 +1,46 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import httpProxy from "http-proxy";
 import { db, projectsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 
 const router = Router();
 
-const proxyCache = new Map<string, ReturnType<typeof createProxyMiddleware>>();
+const proxy = httpProxy.createProxyServer({ changeOrigin: true });
+
+proxy.on("error", (err, req, res) => {
+  logger.error({ err, url: req.url }, "proxy error");
+  const expressRes = res as Response;
+  if (!expressRes.headersSent) {
+    const rawUrl = req.url ?? "";
+    const acceptHeader = (req.headers?.accept as string) ?? "";
+    const isApiRequest = rawUrl.includes("/api/") || acceptHeader.includes("application/json");
+
+    if (isApiRequest) {
+      expressRes.status(200).json({
+        success: false,
+        status: "CRASHED",
+        error: "Sandbox runtime unavailable — app may be starting up or crashed",
+        ts: new Date().toISOString(),
+      });
+    } else {
+      expressRes.status(502).send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"/><meta http-equiv="refresh" content="3"/>
+<title>Connecting...</title>
+<style>body{font-family:-apple-system,sans-serif;background:#0a0e14;color:#cdd9e5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:10px;}
+.s{width:28px;height:28px;border:3px solid #1e2d45;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+p{color:#6e7f96;font-size:14px;text-align:center;max-width:300px}
+small{color:#3e4f63;font-size:11px;margin-top:8px}</style>
+</head><body>
+<div class="s"></div>
+<p>Connecting to your app...</p>
+<small>Auto-refreshing every 3 seconds</small>
+</body></html>`);
+    }
+  }
+});
 
 router.get("/projects/:projectId/health", async (req: Request, res: Response) => {
   const { projectId } = req.params;
@@ -21,7 +54,7 @@ router.get("/projects/:projectId/health", async (req: Request, res: Response) =>
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 2000);
-    const r = await fetch(`http://localhost:${project.port}/`, { signal: ctrl.signal });
+    const r = await fetch(`http://127.0.0.1:${project.port}/`, { signal: ctrl.signal });
     clearTimeout(timer);
     res.json({ live: true, port: project.port, status: r.status, url: project.liveUrl });
   } catch (_) {
@@ -29,7 +62,7 @@ router.get("/projects/:projectId/health", async (req: Request, res: Response) =>
   }
 });
 
-router.use("/preview-proxy/:projectId", async (req: Request, res: Response, next) => {
+router.all("/preview-proxy/:projectId/*path", async (req: Request, res: Response) => {
   const { projectId } = req.params;
 
   const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, Number(projectId))).limit(1);
@@ -55,7 +88,6 @@ router.use("/preview-proxy/:projectId", async (req: Request, res: Response, next
   <h2>Starting your app...</h2>
   <p>Project #${projectId} is spinning up.<br/>This page will refresh automatically.</p>
   <script>
-    // Poll until the app is live
     (function poll() {
       fetch('/api/projects/${projectId}/health')
         .then(r => r.json())
@@ -69,59 +101,14 @@ router.use("/preview-proxy/:projectId", async (req: Request, res: Response, next
   }
 
   const targetPort = project.port;
-  const cacheKey = String(targetPort);
 
-  if (!proxyCache.has(cacheKey)) {
-    const proxy = createProxyMiddleware({
-      target: `http://localhost:${targetPort}`,
-      changeOrigin: true,
-      pathRewrite: { [`^/api/preview-proxy/${projectId}`]: "" },
-      on: {
-        error: (_err, rawReq, res) => {
-          if (!res || !("status" in res)) return;
-          const expressRes = res as Response;
-          // Detect API requests (Accept: application/json or /api/ path)
-          const rawUrl = (rawReq as { url?: string }).url ?? "";
-          const acceptHeader = (rawReq as { headers?: Record<string, string> }).headers?.accept ?? "";
-          const isApiRequest = rawUrl.includes("/api/") || acceptHeader.includes("application/json");
+  req.url = req.url.replace(`/preview-proxy/${projectId}`, "") || "/";
 
-          if (isApiRequest) {
-            // Return structured JSON fallback — lets the frontend show a helpful error state
-            // instead of freezing with "API unavailable"
-            expressRes.status(200).json({
-              success: false,
-              status: "CRASHED",
-              error: "Sandbox runtime unavailable — app may be starting up or crashed",
-              port: targetPort,
-              projectId,
-              ts: new Date().toISOString(),
-            });
-          } else {
-            expressRes.status(502).send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"/><meta http-equiv="refresh" content="3"/>
-<title>Connecting...</title>
-<style>body{font-family:-apple-system,sans-serif;background:#0a0e14;color:#cdd9e5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:10px;}
-.s{width:28px;height:28px;border:3px solid #1e2d45;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg)}}
-p{color:#6e7f96;font-size:14px;text-align:center;max-width:300px}
-small{color:#3e4f63;font-size:11px;margin-top:8px}</style>
-</head><body>
-<div class="s"></div>
-<p>Connecting to your app on port ${targetPort}...</p>
-<small>Auto-refreshing every 3 seconds</small>
-</body></html>`);
-          }
-        },
-      },
-    });
-    proxyCache.set(cacheKey, proxy);
-  }
-
-  proxyCache.get(cacheKey)!(req, res, next);
+  proxy.web(req, res, { target: `http://127.0.0.1:${targetPort}` });
 });
 
-export function invalidateProxyCache(port: number): void {
-  proxyCache.delete(String(port));
+export function invalidateProxyCache(_port: number): void {
+  // No-op: http-proxy is stateless per-request, no cache to invalidate
 }
 
 export default router;

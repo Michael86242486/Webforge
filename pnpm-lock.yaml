@@ -166,6 +166,9 @@ importers:
 
   artifacts/api-server:
     dependencies:
+      '@types/http-proxy':
+        specifier: ^1.17.17
+        version: 1.17.17
       '@workspace/api-zod':
         specifier: workspace:*
         version: link:../../lib/api-zod
@@ -190,6 +193,9 @@ importers:
       express-http-proxy:
         specifier: ^2.1.2
         version: 2.1.2
+      http-proxy:
+        specifier: ^1.18.1
+        version: 1.18.1
       http-proxy-middleware:
         specifier: ^4.0.0
         version: 4.0.0
@@ -1880,6 +1886,9 @@ packages:
   '@types/http-errors@2.0.5':
     resolution: {integrity: sha512-r8Tayk8HJnX0FztbZN7oVqGccWgw98T/0neJphO91KkmOzug1KkofZURD4UaD5uH8AqcFLfdPErnBod0u71/qg==}
 
+  '@types/http-proxy@1.17.17':
+    resolution: {integrity: sha512-ED6LB+Z1AVylNTu7hdzuBqOgMnvG/ld6wGCG8wFnAzKX5uyW2K3WD52v0gnLCTK/VLpXtKckgWuyScYK6cSPaw==}
+
   '@types/node-telegram-bot-api@0.64.14':
     resolution: {integrity: sha512-Nq1LAAw4PGpR8Vii5F7uGlAaAFmaT3cPIt7mUZv6VrftPsrt9xjmnhXD9hoKFstAzn/a5ZCr+ksbkmK+QBhZiA==}
 
@@ -2714,6 +2723,10 @@ packages:
   http-proxy-middleware@4.0.0:
     resolution: {integrity: sha512-wuHwaUtmC0XzJNHqRp41zXtt5ojpHbusXGhq6781VvnjWUYPu7opmOF3eomGNujT07kEOnHWZyV9UZzKimVCKA==}
     engines: {node: ^22.15.0 || ^24.0.0 || >=26.0.0}
+
+  http-proxy@1.18.1:
+    resolution: {integrity: sha512-7mz/721AbnJwIVbnaSv1Cz3Am0ZLT/UBwkC92VlxhXv/k/BBQfM2fXElQNC27BVGr0uwUpplYPQM9LnaBMR5NQ==}
+    engines: {node: '>=8.0.0'}
 
   http-signature@1.4.0:
     resolution: {integrity: sha512-G5akfn7eKbpDN+8nPS/cb57YeA1jLTVxjpCj7tmm3QKPdyDy7T+qSC40e9ptydSWvkwjSXw1VbkpyEm39ukeAg==}
@@ -5288,6 +5301,10 @@ snapshots:
 
   '@types/http-errors@2.0.5': {}
 
+  '@types/http-proxy@1.17.17':
+    dependencies:
+      '@types/node': 25.6.2
+
   '@types/node-telegram-bot-api@0.64.14':
     dependencies:
       '@types/node': 25.6.2
@@ -6134,6 +6151,14 @@ snapshots:
       micromatch: 4.0.8
     transitivePeerDependencies:
       - supports-color
+
+  http-proxy@1.18.1:
+    dependencies:
+      eventemitter3: 4.0.7
+      follow-redirects: 1.16.0
+      requires-port: 1.0.0
+    transitivePeerDependencies:
+      - debug
 
   http-signature@1.4.0:
     dependencies:
