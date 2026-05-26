@@ -41,8 +41,20 @@ const PLATFORM_URL = (() => {
 // Identity, intent detection, conversation history, discovery, and pending
 // build state are all owned by Ruflo inside orchestrator.ts.
 
-const activeSessions = new Set<number>();
+// Tracks number of active concurrent builds per user
+const activeSessions = new Map<number, number>();
 const gitPendingPush = new Map<number, { workDir: string; projectId: number }>();
+
+function activeSessionCount(userId: number): number {
+  return activeSessions.get(userId) ?? 0;
+}
+function activeSessionAdd(userId: number): void {
+  activeSessions.set(userId, (activeSessions.get(userId) ?? 0) + 1);
+}
+function activeSessionRemove(userId: number): void {
+  const n = (activeSessions.get(userId) ?? 1) - 1;
+  if (n <= 0) activeSessions.delete(userId); else activeSessions.set(userId, n);
+}
 
 // ─── Admin Stats Cache (refreshed every 10 min) ───────────────────────────────
 
@@ -158,11 +170,18 @@ async function runFullBuild(
 ): Promise<void> {
   if (!bot) return;
 
-  if (activeSessions.has(telegramId)) {
-    await safeSend(bot, chatId, "⏳ You already have a build running! Wait for it to finish before starting another.");
+  const userRow0 = await db.select().from(usersTable).where(eq(usersTable.telegramId, telegramId)).limit(1);
+  const userTier0 = (userRow0[0]?.tier as Tier) ?? "starter";
+  const maxConcurrent = TIER_LIMITS[userTier0].concurrentBuilds;
+  if (activeSessionCount(telegramId) >= maxConcurrent) {
+    await safeSend(bot, chatId,
+      `⏳ You have *${activeSessionCount(telegramId)}/${maxConcurrent}* concurrent builds running.\n\n` +
+      (maxConcurrent === 1 ? `Upgrade to Pro for *3 simultaneous builds*, or Elite for *5*. Upgrade via ${PAYMENT_BOT_USERNAME}` : `Wait for a slot to free up or use /cancel.`),
+      { parse_mode: "Markdown" }
+    );
     return;
   }
-  activeSessions.add(telegramId);
+  activeSessionAdd(telegramId);
 
   const [project] = await db.insert(projectsTable).values({
     userId: telegramId, name: description.slice(0, 60),
@@ -351,7 +370,7 @@ async function runFullBuild(
       { parse_mode: "Markdown" }
     );
   } finally {
-    activeSessions.delete(telegramId);
+    activeSessionRemove(telegramId);
   }
 }
 
@@ -384,6 +403,7 @@ async function handleHelp(msg: TelegramBot.Message): Promise<void> {
     `/logs \\<id\\> — Tail stdout/stderr of a running app\n` +
     `/delete \\<id\\> — Delete a project\n` +
     `/cancel — Cancel your current build\n` +
+    `/batch — Launch multiple projects simultaneously\n` +
     `/draw \\<prompt\\> — Generate an AI image\n` +
     `/clone\\_repo \\<url\\> — Clone a GitHub repo\n` +
     `/link\\_github \\<PAT\\> — Connect your GitHub account\n` +
@@ -472,7 +492,7 @@ async function handleStatus(msg: TelegramBot.Message): Promise<void> {
   const projects = await db.select().from(projectsTable).where(eq(projectsTable.userId, msg.from!.id));
   const hasGh = !!user.githubToken;
   const hasKey = !!user.apiKey;
-  const building = activeSessions.has(msg.from!.id);
+  const building = activeSessionCount(msg.from!.id) > 0;
 
   await safeSend(bot, msg.chat.id,
     `📊 *Account Status*\n\n` +
@@ -502,15 +522,18 @@ async function handleUpgrade(msg: TelegramBot.Message): Promise<void> {
 async function handleCancel(msg: TelegramBot.Message): Promise<void> {
   if (!bot) return;
   const telegramId = msg.from!.id;
-  const hadSession = activeSessions.has(telegramId);
+  const count = activeSessionCount(telegramId);
   activeSessions.delete(telegramId);
   rufloDeleteDiscovery(telegramId);
   rufloDeletePending(telegramId);
-  if (!hadSession) {
+  if (count === 0) {
     await safeSend(bot, msg.chat.id, "ℹ️ Nothing to cancel — you don't have an active build or pending plan.");
     return;
   }
-  await safeSend(bot, msg.chat.id, "✅ *Cancelled.* What would you like to build instead?", { parse_mode: "Markdown" });
+  await safeSend(bot, msg.chat.id,
+    `✅ *${count > 1 ? `All ${count} builds cancelled.` : "Cancelled."}* What would you like to build instead?`,
+    { parse_mode: "Markdown" }
+  );
 }
 
 // ─── NEW: Delete project ──────────────────────────────────────────────────────
@@ -705,6 +728,96 @@ async function handleCloneRepo(msg: TelegramBot.Message, repoUrl: string): Promi
   }
 }
 
+// ─── Batch Build Command ──────────────────────────────────────────────────────
+
+async function handleBatch(msg: TelegramBot.Message, raw: string): Promise<void> {
+  if (!bot) return;
+  const telegramId = msg.from!.id;
+  const chatId = msg.chat.id;
+
+  const check = await checkActionAllowed(telegramId);
+  if (!check.allowed) {
+    await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`);
+    return;
+  }
+  const tier = check.user!.tier as Tier;
+  const maxConcurrent = TIER_LIMITS[tier].concurrentBuilds;
+
+  // Split on newlines or pipe |
+  const descriptions = raw
+    .split(/\n|\|/)
+    .map(d => d.trim())
+    .filter(d => d.length > 5);
+
+  if (descriptions.length < 2) {
+    await safeSend(bot, chatId,
+      `📦 *Batch Build*\n\nSend multiple project descriptions separated by newlines or \`|\`:\n\n` +
+      `/batch Build a restaurant menu website\nBuild a task manager app\nBuild a weather dashboard\n\n` +
+      `*Your tier (${tier.toUpperCase()}) supports up to ${maxConcurrent} simultaneous builds.*`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const slots = maxConcurrent - activeSessionCount(telegramId);
+  if (slots <= 0) {
+    await safeSend(bot, chatId,
+      `⏳ All *${maxConcurrent}* build slots are full. Wait for one to finish or use /cancel.`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const batch = descriptions.slice(0, slots);
+  const skipped = descriptions.length - batch.length;
+
+  await safeSend(bot, chatId,
+    `🚀 *Batch Launch — ${batch.length} projects*${skipped > 0 ? ` (${skipped} skipped — slot limit)` : ""}\n\n` +
+    batch.map((d, i) => `${i + 1}. ${escapeMd(d.slice(0, 60))}`).join("\n") +
+    `\n\n⏳ Planning all projects now...`,
+    { parse_mode: "Markdown" }
+  );
+
+  // Plan all projects in parallel first, then build in parallel
+  const planResults = await Promise.allSettled(
+    batch.map(async (desc) => {
+      const { planningMode } = await import("../engines/orchestrator.js");
+      const { routeTask: _rt } = await import("../ai/router.js");
+      const plan = await planningMode(
+        desc,
+        (taskType, p, t, id, sys) => _rt(taskType, p, t, id, sys ?? RUFLO_PERSONA_MATRIX),
+        telegramId,
+        tier
+      );
+      return { desc, plan };
+    })
+  );
+
+  const successful = planResults.filter(r => r.status === "fulfilled") as PromiseFulfilledResult<{ desc: string; plan: PlanningResult }>[];
+  const failed = planResults.filter(r => r.status === "rejected").length;
+
+  if (failed > 0) {
+    await safeSend(bot, chatId, `⚠️ *${failed}* project(s) failed to plan and were skipped.`, { parse_mode: "Markdown" });
+  }
+
+  if (successful.length === 0) {
+    await safeSend(bot, chatId, "❌ All project plans failed — try again with clearer descriptions.");
+    return;
+  }
+
+  await safeSend(bot, chatId,
+    `✅ *${successful.length} plans ready — launching all builds simultaneously!* 🔥`,
+    { parse_mode: "Markdown" }
+  );
+
+  // Fire all builds concurrently — each one is non-blocking
+  await Promise.all(
+    successful.map(({ value: { desc, plan } }) =>
+      runFullBuild(chatId, telegramId, desc, plan, tier, tier === "elite").catch(logger.error)
+    )
+  );
+}
+
 // ─── General Message Handler (thin traffic controller → Ruflo dispatch) ───────
 
 async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
@@ -877,6 +990,11 @@ export function initCoreBot(): void {
   bot.onText(/\/status/, safeHandler(handleStatus));
   bot.onText(/\/upgrade/, safeHandler(handleUpgrade));
   bot.onText(/\/cancel/, safeHandler(handleCancel));
+  bot.onText(/\/batch(?:\s+([\s\S]+))?/, safeHandler(async (msg, match) => {
+    if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
+    const raw = match?.[1]?.trim() ?? "";
+    await handleBatch(msg, raw);
+  }));
 
   // ── Admin-only: /broadcast ────────────────────────────────────────────────
   bot.onText(/\/broadcast(?:\s+([\s\S]+))?/, safeHandler(async (msg, match) => {

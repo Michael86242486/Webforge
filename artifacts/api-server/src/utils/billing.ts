@@ -11,6 +11,7 @@ export const TIER_LIMITS: Record<Tier, {
   botHosting: boolean;
   customKeys: boolean;
   gitClone: boolean;
+  concurrentBuilds: number;
 }> = {
   starter: {
     maxProjects: 3,
@@ -20,6 +21,7 @@ export const TIER_LIMITS: Record<Tier, {
     botHosting: false,
     customKeys: false,
     gitClone: false,
+    concurrentBuilds: 1,
   },
   pro: {
     maxProjects: Infinity,
@@ -33,6 +35,7 @@ export const TIER_LIMITS: Record<Tier, {
     botHosting: true,
     customKeys: true,
     gitClone: true,
+    concurrentBuilds: 3,
   },
   elite: {
     maxProjects: Infinity,
@@ -46,6 +49,7 @@ export const TIER_LIMITS: Record<Tier, {
     botHosting: true,
     customKeys: true,
     gitClone: true,
+    concurrentBuilds: 5,
   },
 };
 
