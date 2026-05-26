@@ -9,12 +9,22 @@ const GATEWAY_KEY = process.env.AI_GATEWAY_KEY ?? "";
 
 export type TaskType = "planning" | "coding" | "fixing" | "chat" | "image" | "ui";
 
+const WEBFORGE_DEFAULT_SYSTEM = `You are WebForge — an elite autonomous AI platform engine. You ONLY discuss software, app building, and the WebForge platform.
+
+HARD RULES:
+- You ALWAYS respond in English regardless of what language the user writes in.
+- You NEVER break character or act as a general-purpose chatbot.
+- You NEVER give advice about AWS, Docker, cloud providers, or generic computing.
+- You NEVER say "How can I help you today?" as a standalone reply.
+- If someone asks who you are: "I am WebForge — an autonomous build engine. Describe what you want to build."
+- Keep responses concise, direct, and action-oriented.`;
+
 const TASK_MODEL_MAP: Record<TaskType, string[]> = {
   planning: ["deepseek-r1", "kimi-k2-thinking"],
   coding:   ["dev-x", "gpt-oss-120b", "grok-3"],
-  fixing:   ["gpt-5-nano", "gemini-2.5-flash-lite", "mistral"],
+  fixing:   ["dev-x", "gpt-5-nano", "gemini-2.5-flash-lite"],
   chat:     ["gpt-5-nano", "gemini-2.5-flash-lite", "mistral"],
-  image:    ["image-gen", "qwen-max-image", "gemini-flash-image"],
+  image:    ["image-gen"],
   ui:       ["grok-3-mini", "llama-3.3-70b-instruct"],
 };
 
@@ -54,6 +64,19 @@ export interface RouterResult {
   costUsd: number;
 }
 
+const COST_MAP: Record<string, { input: number; output: number }> = {
+  "deepseek-r1":           { input: 0.55,  output: 2.19  },
+  "kimi-k2-thinking":      { input: 0.60,  output: 2.50  },
+  "dev-x":                 { input: 0.90,  output: 1.80  },
+  "gpt-oss-120b":          { input: 1.10,  output: 2.20  },
+  "grok-3":                { input: 3.00,  output: 15.00 },
+  "gpt-5-nano":            { input: 0.15,  output: 0.60  },
+  "gemini-2.5-flash-lite": { input: 0.10,  output: 0.40  },
+  "mistral":               { input: 0.25,  output: 0.75  },
+  "grok-3-mini":           { input: 0.30,  output: 0.50  },
+  "llama-3.3-70b-instruct":{ input: 0.20,  output: 0.40  },
+};
+
 export async function routeTask(
   taskType: TaskType,
   prompt: string,
@@ -66,32 +89,23 @@ export async function routeTask(
 
   logger.info({ taskType, model, tier }, "Routing AI task");
 
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
-  messages.push({ role: "user", content: prompt });
+  // ALWAYS inject a system prompt — never allow the model to run context-free
+  const sysContent = systemPrompt ?? WEBFORGE_DEFAULT_SYSTEM;
+
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: sysContent },
+    { role: "user", content: prompt },
+  ];
 
   const completion = await client.chat.completions.create({
     model,
     messages,
-    temperature: taskType === "planning" ? 0.3 : 0.7,
+    temperature: taskType === "planning" ? 0.3 : taskType === "coding" ? 0.15 : 0.6,
   });
 
   const content = completion.choices[0]?.message?.content ?? "";
   const inputTokens = completion.usage?.prompt_tokens ?? 0;
   const outputTokens = completion.usage?.completion_tokens ?? 0;
-
-  const COST_MAP: Record<string, { input: number; output: number }> = {
-    "deepseek-r1":           { input: 0.55,  output: 2.19  },
-    "kimi-k2-thinking":      { input: 0.60,  output: 2.50  },
-    "dev-x":                 { input: 0.90,  output: 1.80  },
-    "gpt-oss-120b":          { input: 1.10,  output: 2.20  },
-    "grok-3":                { input: 3.00,  output: 15.00 },
-    "gpt-5-nano":            { input: 0.15,  output: 0.60  },
-    "gemini-2.5-flash-lite": { input: 0.10,  output: 0.40  },
-    "mistral":               { input: 0.25,  output: 0.75  },
-    "grok-3-mini":           { input: 0.30,  output: 0.50  },
-    "llama-3.3-70b-instruct":{ input: 0.20,  output: 0.40  },
-  };
   const costs = COST_MAP[model] ?? { input: 0.50, output: 1.00 };
   const costUsd = (inputTokens / 1_000_000) * costs.input + (outputTokens / 1_000_000) * costs.output;
 
@@ -122,21 +136,29 @@ export async function deepBuildLoop(
   let totalOutputTokens = 0;
   let totalCostUsd = 0;
   const errors: string[] = [];
-
-  const COST_MAP: Record<string, { input: number; output: number }> = {
-    "dev-x": { input: 0.90, output: 1.80 },
-  };
   const costs = COST_MAP[model] ?? { input: 0.90, output: 1.80 };
 
+  // Inject the WebForge system identity AND code-output constraints together
+  const codeSystemPrompt = `${systemPrompt}
+
+━━━ ABSOLUTE CODE OUTPUT RULES ━━━
+You are generating SOURCE CODE FILES for a user's application. These are MANDATORY:
+
+1. EVERY file in the list must be 100% complete with real, working code.
+2. NEVER write empty files, placeholder comments like "// code here", "// TODO", or "..." truncations.
+3. NEVER write "rest of code remains the same" — always write the FULL code.
+4. The server entry point MUST use: const PORT = process.env.PORT || 3000;
+5. package.json MUST have a "start" script: "node src/index.js" (or whichever entry file you create).
+6. Use CommonJS (require/module.exports) for all server files — NOT ES modules (no "import" statements in .js files).
+7. The average code file should be 50-200 lines. If you write less than 20 lines per file, you have NOT fulfilled the requirement.`;
+
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: systemPrompt },
-    {
-      role: "user",
-      content: `${initialPrompt}\n\nIMPORTANT: Output production-ready, complete, runnable code only. No placeholders, no TODO comments, no truncation. Include all imports, error handling, and a working entry point.`,
-    },
+    { role: "system", content: codeSystemPrompt },
+    { role: "user", content: initialPrompt },
   ];
 
   let lastCode = "";
+  let completedRounds = 0;
 
   for (let round = 1; round <= maxRounds; round++) {
     logger.info({ round, maxRounds, telegramId }, "DeepBuild round");
@@ -144,7 +166,8 @@ export async function deepBuildLoop(
     const completion = await client.chat.completions.create({
       model,
       messages,
-      temperature: 0.2,
+      temperature: 0.1,
+      max_tokens: 16000,
     });
 
     const content = completion.choices[0]?.message?.content ?? "";
@@ -156,27 +179,29 @@ export async function deepBuildLoop(
 
     messages.push({ role: "assistant", content });
     lastCode = content;
+    completedRounds = round;
 
     const lintErrors = detectCodeIssues(content);
+    onRound?.(round, maxRounds, lintErrors);
+
     if (lintErrors.length === 0) {
-      logger.info({ round }, "DeepBuild: no issues detected, stopping early");
+      logger.info({ round }, "DeepBuild: clean pass, stopping");
       break;
     }
 
     errors.push(...lintErrors);
-    onRound?.(round, maxRounds, lintErrors);
 
     if (round < maxRounds) {
       messages.push({
         role: "user",
-        content: `Round ${round} review found these issues that must be fixed:\n\n${lintErrors.map((e, i) => `${i + 1}. ${e}`).join("\n")}\n\nFix ALL of them. Output the complete corrected code — no truncation, no ellipsis, no comments saying "rest of code here".`,
+        content: `CORRECTIONS REQUIRED for round ${round + 1}:\n\n${lintErrors.map((e, i) => `${i + 1}. ${e}`).join("\n")}\n\nOutput ALL files again with these issues fixed. Do NOT truncate. Do NOT use placeholders. Write every file completely.`,
       });
     }
   }
 
   return {
     finalCode: lastCode,
-    rounds: errors.length === 0 ? 1 : Math.min(maxRounds, errors.length + 1),
+    rounds: completedRounds,
     model,
     totalInputTokens,
     totalOutputTokens,
@@ -189,25 +214,26 @@ function detectCodeIssues(code: string): string[] {
   const issues: string[] = [];
   const lower = code.toLowerCase();
 
-  if (/\btodo\b|\bfixme\b|\bplaceholder\b/.test(lower)) {
-    issues.push("Code contains TODO/FIXME/placeholder markers — replace with real implementation");
+  // Must have actual file markers — if no files found that's an issue
+  const hasFileMarkers = /===\s*FILE:/i.test(code) || /```[\w]*\n/.test(code);
+  if (!hasFileMarkers) {
+    issues.push("No code files detected in output — use '=== FILE: path ===' markers for each file");
+    return issues; // No point checking further
   }
-  if (/\.\.\.|\[rest of/.test(code)) {
-    issues.push("Code is truncated (contains '...' or '[rest of') — output the complete file");
+
+  if (/\btodo\b|\bfixme\b/i.test(lower) && /\/\/\s*(todo|fixme)/i.test(code)) {
+    issues.push("Code contains TODO/FIXME markers — replace with real implementation");
   }
-  if (/require\(['"]/.test(code) && /^import\s/m.test(code)) {
-    issues.push("Mixed CommonJS require() and ES module import — pick one module system");
+  if (/(?<!\.)\.\.\.(?!\w)/.test(code) && /\[\s*rest\s+of|\/\/\s*rest\s+of|#\s*rest\s+of/i.test(code)) {
+    issues.push("Code is truncated — output the COMPLETE file contents, no shortcuts");
   }
-  const openBraces = (code.match(/\{/g) ?? []).length;
-  const closeBraces = (code.match(/\}/g) ?? []).length;
-  if (Math.abs(openBraces - closeBraces) > 2) {
-    issues.push(`Unbalanced braces: ${openBraces} opening vs ${closeBraces} closing`);
+  // Check for suspiciously short responses (likely empty/placeholder files)
+  const fileBlocks = code.match(/===\s*FILE:[\s\S]*?===\s*END\s*FILE/g) ?? [];
+  const shortFiles = fileBlocks.filter(block => block.replace(/===.*?===/g, "").trim().split("\n").length < 5);
+  if (shortFiles.length > 0) {
+    issues.push(`${shortFiles.length} file(s) appear empty or near-empty — write complete, working code for every file`);
   }
-  if (!/export\s+default|module\.exports|export\s+\{|export\s+function|export\s+const|export\s+class/.test(code)) {
-    if (code.length > 200) {
-      issues.push("No exports detected — ensure the module exports its main interface");
-    }
-  }
+
   return issues;
 }
 

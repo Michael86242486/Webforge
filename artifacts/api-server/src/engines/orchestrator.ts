@@ -31,10 +31,7 @@ export interface FileTask {
   content: string;
 }
 
-export async function writeFilesParallel(
-  tasks: FileTask[],
-  sessionId?: string
-): Promise<void> {
+export async function writeFilesParallel(tasks: FileTask[], sessionId?: string): Promise<void> {
   await Promise.all(
     tasks.map(async ({ filePath, content }) => {
       let before = "";
@@ -42,7 +39,7 @@ export async function writeFilesParallel(
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, content, "utf8");
       if (sessionId) recordFileDiff(sessionId, before, content);
-      logger.info({ filePath }, "File written by OpenClaw");
+      logger.info({ filePath }, "File written");
     })
   );
 }
@@ -77,16 +74,7 @@ export async function runTerminalCommand(
   }
 }
 
-export async function cloneRepository(repoUrl: string, targetDir: string): Promise<void> {
-  await fs.mkdir(path.dirname(targetDir), { recursive: true });
-  await runTerminalCommand(`git clone --depth=1 ${repoUrl} ${targetDir}`, "/tmp");
-}
-
-export function spawnBotProcess(
-  workDir: string,
-  entryFile: string,
-  env: NodeJS.ProcessEnv
-): { pid: number | undefined } {
+export function spawnBotProcess(workDir: string, entryFile: string, env: NodeJS.ProcessEnv): { pid: number | undefined } {
   const child = spawn("node", [entryFile], {
     cwd: workDir,
     env: { ...process.env, ...env },
@@ -100,38 +88,24 @@ export function spawnBotProcess(
 export async function detectEntryPoint(workDir: string): Promise<string> {
   try {
     const raw = await fs.readFile(path.join(workDir, "package.json"), "utf8");
-    const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; main?: string; type?: string };
-
+    const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; main?: string };
     if (pkg.scripts?.start) {
-      const nodeMatch = pkg.scripts.start.match(/node\s+([\w./src-]+\.m?js)/);
-      if (nodeMatch) return nodeMatch[1];
+      const m = pkg.scripts.start.match(/node\s+([\w./src-]+\.m?js)/);
+      if (m) return m[1];
     }
     if (pkg.main) return pkg.main;
   } catch (_) {}
 
-  const candidates = [
-    "src/index.js", "src/server.js", "src/app.js",
-    "index.js", "server.js", "app.js",
-    "src/index.mjs", "index.mjs",
-  ];
-  for (const p of candidates) {
+  for (const p of ["src/index.js","src/server.js","src/app.js","index.js","server.js","app.js","src/index.mjs"]) {
     try { await fs.access(path.join(workDir, p)); return p; } catch (_) {}
   }
   return "index.js";
 }
 
-export async function spawnProjectApp(
-  workDir: string,
-  projectId: number,
-  port: number,
-): Promise<{ pid: number | undefined }> {
+export async function spawnProjectApp(workDir: string, projectId: number, port: number): Promise<{ pid: number | undefined }> {
   const entry = await detectEntryPoint(workDir);
-
-  const stdoutLog = path.join(workDir, "app.stdout.log");
-  const stderrLog = path.join(workDir, "app.stderr.log");
-
-  const outFd = fsSync.openSync(stdoutLog, "a");
-  const errFd = fsSync.openSync(stderrLog, "a");
+  const outFd = fsSync.openSync(path.join(workDir, "app.stdout.log"), "a");
+  const errFd = fsSync.openSync(path.join(workDir, "app.stderr.log"), "a");
 
   const child = spawn("node", [entry], {
     cwd: workDir,
@@ -140,16 +114,11 @@ export async function spawnProjectApp(
     stdio: ["ignore", outFd, errFd],
   });
   child.unref();
-
   logger.info({ projectId, port, entry, pid: child.pid }, "Project app spawned");
   return { pid: child.pid };
 }
 
-export async function pollAppHealth(
-  port: number,
-  maxMs = 90_000,
-  intervalMs = 2_500,
-): Promise<boolean> {
+export async function pollAppHealth(port: number, maxMs = 90_000, intervalMs = 2_500): Promise<boolean> {
   const deadline = Date.now() + maxMs;
   while (Date.now() < deadline) {
     try {
@@ -165,92 +134,39 @@ export async function pollAppHealth(
   return false;
 }
 
-export async function scaffoldBotProject(
-  workDir: string,
-  botToken: string,
-  description: string,
-  commands: string
-): Promise<void> {
-  const packageJson = {
-    name: "user-telegram-bot",
-    version: "1.0.0",
-    type: "module",
-    main: "index.mjs",
-    dependencies: { "node-telegram-bot-api": "^0.66.0" },
-  };
-
-  const personaJson = {
-    name: "WebForge Assistant",
-    systemPrompt: `You are a helpful assistant. ${description}`,
-    tone: "friendly",
-    instructions: commands,
-  };
-
-  const indexMjs = `
-import TelegramBot from 'node-telegram-bot-api';
-import { readFileSync } from 'fs';
-
-const BOT_TOKEN = '${botToken}';
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-
-function getPersona() {
-  try {
-    return JSON.parse(readFileSync('./config/persona.json', 'utf8'));
-  } catch {
-    return { systemPrompt: 'You are a helpful assistant.', name: 'Bot' };
-  }
-}
-
-bot.onText(/\\/start/, (msg) => {
-  const persona = getPersona();
-  bot.sendMessage(msg.chat.id, \`Hello! I am \${persona.name}. How can I help you today?\`);
-});
-
-bot.on('message', async (msg) => {
-  if (msg.text?.startsWith('/')) return;
-  const persona = getPersona();
-  bot.sendMessage(msg.chat.id, \`[\${persona.name}] Processing: \${msg.text}\`);
-});
-
-console.log('Bot started and polling...');
-`;
-
+export async function scaffoldBotProject(workDir: string, botToken: string, description: string, commands: string): Promise<void> {
   const tasks: FileTask[] = [
-    { filePath: path.join(workDir, "package.json"), content: JSON.stringify(packageJson, null, 2) },
-    { filePath: path.join(workDir, "index.mjs"), content: indexMjs.trim() },
-    { filePath: path.join(workDir, "config", "persona.json"), content: JSON.stringify(personaJson, null, 2) },
+    {
+      filePath: path.join(workDir, "package.json"),
+      content: JSON.stringify({ name: "user-bot", version: "1.0.0", main: "index.js", dependencies: { "node-telegram-bot-api": "^0.66.0" } }, null, 2),
+    },
+    {
+      filePath: path.join(workDir, "config", "persona.json"),
+      content: JSON.stringify({ name: "WebForge Bot", systemPrompt: description, instructions: commands }, null, 2),
+    },
+    {
+      filePath: path.join(workDir, "index.js"),
+      content: `const TelegramBot = require('node-telegram-bot-api');
+const fs = require('fs');
+const bot = new TelegramBot('${botToken}', { polling: true });
+function getPersona() {
+  try { return JSON.parse(fs.readFileSync('./config/persona.json','utf8')); }
+  catch { return { name: 'Bot', systemPrompt: 'You are helpful.' }; }
+}
+bot.onText(/\\/start/, msg => {
+  const p = getPersona();
+  bot.sendMessage(msg.chat.id, 'Hi! I am ' + p.name + '. How can I help?');
+});
+bot.on('message', msg => {
+  if (msg.text?.startsWith('/')) return;
+  bot.sendMessage(msg.chat.id, '[' + getPersona().name + '] Got: ' + msg.text);
+});
+console.log('Bot polling...');
+`,
+    },
   ];
-
   await writeFilesParallel(tasks);
   await runTerminalCommand("npm install --legacy-peer-deps", workDir);
-}
-
-export async function processImageWithSharp(
-  inputPath: string,
-  operation: {
-    type: "resize" | "crop" | "filter" | "overlay";
-    width?: number;
-    height?: number;
-    grayscale?: boolean;
-  },
-  outputPath: string
-): Promise<void> {
-  const { default: sharp } = await import("sharp");
-  let pipeline = sharp(inputPath);
-
-  switch (operation.type) {
-    case "resize":
-      pipeline = pipeline.resize(operation.width, operation.height, { fit: "cover" });
-      break;
-    case "crop":
-      pipeline = pipeline.resize(operation.width, operation.height, { fit: "cover", position: "center" });
-      break;
-    case "filter":
-      if (operation.grayscale) pipeline = pipeline.grayscale();
-      break;
-  }
-
-  await pipeline.toFile(outputPath);
 }
 
 export interface PlanningResult {
@@ -261,35 +177,34 @@ export interface PlanningResult {
 
 export async function planningMode(
   userPrompt: string,
-  routeTaskFn: (
-    taskType: "planning",
-    prompt: string,
-    tier: string,
-    telegramId?: number,
-    systemPrompt?: string,
-  ) => Promise<{ content: string; model: string }>,
+  routeTaskFn: (taskType: "planning", prompt: string, tier: string, telegramId?: number, systemPrompt?: string) => Promise<{ content: string; model: string }>,
   telegramId: number,
   tier: string,
 ): Promise<PlanningResult> {
-  const planPrompt = `Analyze this project request and output a structured build plan as JSON.
+  const planPrompt = `You are planning a software project. Output ONLY valid JSON (no markdown fences, no prose).
 
 User request: "${userPrompt}"
 
-Output ONLY valid JSON (no markdown fences, no explanation outside the JSON object):
+JSON format:
 {
-  "techStack": "e.g. Node.js + Express + SQLite",
-  "summary": "One sentence describing what this project does",
+  "techStack": "Node.js + Express + SQLite",
+  "summary": "One sentence describing the app",
   "files": [
-    { "path": "package.json", "description": "Node.js project manifest" },
-    { "path": "src/index.js", "description": "Express server entry point" }
+    { "path": "package.json", "description": "Node.js project manifest with start script" },
+    { "path": "src/index.js", "description": "Express server, listens on process.env.PORT" },
+    { "path": "src/routes/api.js", "description": "REST API routes" },
+    { "path": "public/index.html", "description": "Main HTML page" },
+    { "path": "public/style.css", "description": "CSS styles" },
+    { "path": "public/app.js", "description": "Frontend JavaScript" }
   ]
 }
 
-IMPORTANT:
-- Use plain JavaScript (NOT TypeScript) for all server/backend files
-- The main entry must be runnable with: node <entry>
-- Include process.env.PORT usage in the server file
-- Aim for 8-15 files for a complete working app`;
+RULES:
+- Use plain JavaScript (CommonJS require/exports) for all server files — NO TypeScript
+- Include process.env.PORT in the server entry file
+- package.json must have: { "scripts": { "start": "node src/index.js" } }
+- Target 8-14 files for a complete working app
+- Return ONLY the JSON object, nothing else`;
 
   const result = await routeTaskFn("planning", planPrompt, tier, telegramId);
 
@@ -300,17 +215,18 @@ IMPORTANT:
     return {
       manifest: parsed.files ?? [],
       techStack: parsed.techStack ?? "fullstack",
-      summary: parsed.summary ?? "Custom application",
+      summary: parsed.summary ?? userPrompt.slice(0, 80),
     };
   } catch (err) {
     logger.warn({ err }, "planningMode JSON parse failed, using fallback");
     return {
       manifest: [
-        { path: "package.json", description: "Project manifest" },
-        { path: "src/index.js", description: "Express server entry point" },
+        { path: "package.json", description: "Node.js project manifest" },
+        { path: "src/index.js", description: "Express server (process.env.PORT)" },
         { path: "src/routes/api.js", description: "API routes" },
-        { path: "public/index.html", description: "Frontend HTML" },
-        { path: "public/style.css", description: "Frontend styles" },
+        { path: "public/index.html", description: "Main HTML page" },
+        { path: "public/style.css", description: "Styles" },
+        { path: "public/app.js", description: "Frontend logic" },
         { path: "README.md", description: "Documentation" },
       ],
       techStack: "Node.js + Express",
@@ -319,34 +235,81 @@ IMPORTANT:
   }
 }
 
+// ─── File Parser (multi-format, aggressive) ───────────────────────────────────
+
 export interface ParsedFile {
   path: string;
   content: string;
 }
 
-export function parseFilesFromAIOutput(output: string): ParsedFile[] {
+/**
+ * Parse AI output into file objects. Handles 4 formats in priority order:
+ * 1. === FILE: path === ... === END FILE ===  (preferred)
+ * 2. **`path`** or ## path followed by a code block
+ * 3. Code block with // FILE: path comment as first line
+ * 4. Named code blocks matched against manifest
+ */
+export function parseFilesFromAIOutput(output: string, manifest?: FilePlan[]): ParsedFile[] {
   const files: ParsedFile[] = [];
+  const seen = new Set<string>();
 
-  const markerRegex = /===\s*FILE:\s*(.+?)\s*===\n([\s\S]*?)(?====\s*(?:FILE:|END FILE)|$)/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = markerRegex.exec(output)) !== null) {
-    const filePath = match[1].trim();
-    const content = match[2].replace(/===\s*END FILE\s*===\s*$/, "").trim();
-    if (filePath && content) files.push({ path: filePath, content });
+  function add(filePath: string, content: string) {
+    const clean = filePath.trim().replace(/^\/+/, "");
+    const body = content.trim();
+    if (!clean || !body || seen.has(clean)) return;
+    seen.add(clean);
+    files.push({ path: clean, content: body });
   }
 
+  // ── Format 1: === FILE: path === ... === END FILE ===
+  const fmt1 = /===\s*FILE:\s*(.+?)\s*===\n([\s\S]*?)(?====\s*(?:FILE:|END\s*FILE)|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = fmt1.exec(output)) !== null) {
+    const body = m[2].replace(/===\s*END\s*FILE\s*===/i, "").trim();
+    add(m[1], body);
+  }
   if (files.length > 0) return files;
 
-  const codeBlockRegex = /```[\w.]*\n(?:(?:\/\/|#)\s*FILE:\s*(.+?)\n)?([\s\S]*?)```/g;
-  while ((match = codeBlockRegex.exec(output)) !== null) {
-    const filePath = match[1]?.trim();
-    const content = match[2].trim();
-    if (filePath && content) files.push({ path: filePath, content });
+  // ── Format 2: // FILE: path OR # path OR **path** before a code block
+  const fmt2 = /(?:\/\/\s*FILE:\s*|#\s*FILE:\s*|\*\*`?|##?\s+)([^\n`*]+)`?\*?\*?\n```[\w]*\n([\s\S]*?)```/gi;
+  while ((m = fmt2.exec(output)) !== null) {
+    add(m[1], m[2]);
+  }
+  if (files.length > 0) return files;
+
+  // ── Format 3: Code block where first line is a path comment
+  const fmt3 = /```[\w.-]*\n([\s\S]*?)```/gi;
+  const codeBlocks: string[] = [];
+  while ((m = fmt3.exec(output)) !== null) {
+    codeBlocks.push(m[1]);
+  }
+
+  for (const block of codeBlocks) {
+    const firstLine = block.split("\n")[0] ?? "";
+    // e.g. "// src/index.js" or "# package.json"
+    const pathMatch = firstLine.match(/^(?:\/\/|#|\/\*)\s*([\w./src-]+\.\w{1,5})/);
+    if (pathMatch) {
+      add(pathMatch[1], block.split("\n").slice(1).join("\n").trim());
+    }
+  }
+  if (files.length > 0) return files;
+
+  // ── Format 4: Match code blocks to manifest by order or content heuristics
+  if (manifest && codeBlocks.length > 0) {
+    logger.warn("parseFilesFromAIOutput: falling back to manifest-order matching");
+    for (let i = 0; i < Math.min(codeBlocks.length, manifest.length); i++) {
+      const block = codeBlocks[i];
+      const plan = manifest[i];
+      if (block && plan && block.trim().length > 20) {
+        add(plan.path, block.trim());
+      }
+    }
   }
 
   return files;
 }
+
+// ─── Build Project Files ──────────────────────────────────────────────────────
 
 export async function buildProjectFiles(
   workDir: string,
@@ -355,12 +318,23 @@ export async function buildProjectFiles(
   manifest: FilePlan[],
   onFileWritten: (filesWritten: number, filePath: string) => void,
 ): Promise<number> {
-  const parsed = parseFilesFromAIOutput(aiOutput);
+  const parsed = parseFilesFromAIOutput(aiOutput, manifest);
 
-  const toWrite: ParsedFile[] = parsed.length > 0 ? parsed : manifest.map((f, i) => ({
-    path: f.path,
-    content: generateFallbackFile(f, i, manifest.length),
-  }));
+  logger.info({ projectId, parsedCount: parsed.length, outputLength: aiOutput.length }, "buildProjectFiles: parsed files");
+
+  let toWrite: ParsedFile[];
+  if (parsed.length === 0) {
+    // Fallback: generate a minimal working Express app that at least runs
+    logger.warn({ projectId }, "No files parsed from AI output — using guaranteed fallback app");
+    toWrite = generateGuaranteedApp(manifest);
+  } else {
+    // Fill in any manifest files that weren't in the AI output with stubs
+    const parsedPaths = new Set(parsed.map(f => f.path));
+    const stubs = manifest
+      .filter(m => !parsedPaths.has(m.path))
+      .map(m => ({ path: m.path, content: generateStubFile(m) }));
+    toWrite = [...parsed, ...stubs];
+  }
 
   let written = 0;
   for (const file of toWrite) {
@@ -369,43 +343,167 @@ export async function buildProjectFiles(
     await fs.writeFile(absPath, file.content, "utf8");
     written++;
     onFileWritten(written, file.path);
-    logger.info({ projectId, filePath: file.path }, "Project file written");
+    logger.info({ projectId, filePath: file.path, size: file.content.length }, "Project file written");
   }
 
   return written;
 }
 
-function generateFallbackFile(f: FilePlan, index: number, total: number): string {
-  if (f.path === "package.json") {
-    return JSON.stringify({
-      name: "webforge-app",
-      version: "1.0.0",
-      scripts: { start: "node src/index.js" },
-      dependencies: { express: "^4.18.2" },
-    }, null, 2);
-  }
-  if (f.path.endsWith("index.js") || f.path.endsWith("server.js")) {
-    return `const express = require('express');
+// ─── Guaranteed Working App Fallback ─────────────────────────────────────────
+
+function generateGuaranteedApp(manifest: FilePlan[]): ParsedFile[] {
+  const appName = "webforge-app";
+  return [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        name: appName,
+        version: "1.0.0",
+        scripts: { start: "node src/index.js" },
+        dependencies: { express: "^4.18.2" },
+      }, null, 2),
+    },
+    {
+      path: "src/index.js",
+      content: `const express = require('express');
 const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', project: 'webforge-app' }));
-app.listen(PORT, () => console.log('Server running on port ' + PORT));
-`;
-  }
-  if (f.path.endsWith(".html")) {
-    return `<!DOCTYPE html>
+
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', project: '${appName}', timestamp: new Date().toISOString() });
+});
+
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(__dirname, '../public/index.html'));
+});
+
+app.listen(PORT, () => {
+  console.log('${appName} running on port ' + PORT);
+});
+`,
+    },
+    {
+      path: "public/index.html",
+      content: `<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>WebForge App</title>
-<link rel="stylesheet" href="style.css"/>
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WebForge App</title>
+  <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-<div id="app"><h1>WebForge App</h1><p>${f.description}</p></div>
-<script src="app.js"></script>
-</body></html>`;
+  <div class="container">
+    <div class="badge">Built with WebForge ⚡</div>
+    <h1>Your app is live!</h1>
+    <p>${manifest[0]?.description ?? "Your WebForge application is running."}</p>
+    <div class="status" id="status">Checking API...</div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>`,
+    },
+    {
+      path: "public/style.css",
+      content: `* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: linear-gradient(135deg, #0a0e14 0%, #111720 100%);
+  color: #cdd9e5;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.container {
+  text-align: center;
+  padding: 48px 32px;
+  max-width: 600px;
+}
+.badge {
+  display: inline-block;
+  background: rgba(88,166,255,.15);
+  color: #58a6ff;
+  border: 1px solid rgba(88,166,255,.3);
+  padding: 6px 16px;
+  border-radius: 100px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 24px;
+}
+h1 {
+  font-size: clamp(28px, 5vw, 48px);
+  font-weight: 800;
+  letter-spacing: -.02em;
+  margin-bottom: 16px;
+  background: linear-gradient(135deg, #cdd9e5, #58a6ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+p {
+  font-size: 18px;
+  color: #8b949e;
+  line-height: 1.6;
+  margin-bottom: 32px;
+}
+.status {
+  display: inline-block;
+  background: rgba(63,185,80,.1);
+  color: #3fb950;
+  border: 1px solid rgba(63,185,80,.3);
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-family: monospace;
+  font-size: 13px;
+}`,
+    },
+    {
+      path: "public/app.js",
+      content: `fetch('/api/health')
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById('status').textContent = '✅ API: ' + d.status + ' — ' + d.timestamp;
+  })
+  .catch(() => {
+    document.getElementById('status').textContent = '⚠️ API unavailable';
+    document.getElementById('status').style.color = '#f0883e';
+  });`,
+    },
+  ];
+}
+
+function generateStubFile(f: FilePlan): string {
+  if (f.path === "README.md") {
+    return `# ${f.path.replace(/\.md$/, "")}\n\n${f.description}\n\nGenerated by WebForge.\n`;
   }
-  return `// ${f.description}\n// File ${index + 1} of ${total} — generated by WebForge\n`;
+  if (f.path.endsWith(".json") && f.path !== "package.json") {
+    return `{}\n`;
+  }
+  if (f.path.endsWith(".css")) {
+    return `/* ${f.description} */\n`;
+  }
+  return `// ${f.description}\n`;
+}
+
+export async function cloneRepository(repoUrl: string, targetDir: string): Promise<void> {
+  await fs.mkdir(path.dirname(targetDir), { recursive: true });
+  await runTerminalCommand(`git clone --depth=1 ${repoUrl} ${targetDir}`, "/tmp");
+}
+
+export async function processImageWithSharp(
+  inputPath: string,
+  operation: { type: "resize" | "crop" | "filter"; width?: number; height?: number; grayscale?: boolean },
+  outputPath: string,
+): Promise<void> {
+  const { default: sharp } = await import("sharp");
+  let pipeline = sharp(inputPath);
+  if (operation.type === "resize" || operation.type === "crop") {
+    pipeline = pipeline.resize(operation.width, operation.height, { fit: "cover" });
+  }
+  if (operation.grayscale) pipeline = pipeline.grayscale();
+  await pipeline.toFile(outputPath);
 }
