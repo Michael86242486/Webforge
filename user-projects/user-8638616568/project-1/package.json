@@ -1,7 +1,7 @@
 {
   "name": "vibeforge",
-  "version": "1.0.0",
-  "description": "Highly functional, secure portfolio and monetization platform for independent music producer VibeForge",
+  "version": ".0.0",
+ "description": "Highly functional, secure portfolio and monetization platform for independent music producer VibeForge",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js"
@@ -11,17 +11,13 @@
     "producer",
     "portfolio",
     "monetization",
- "audio-player",
-    "ecommerce"
+    "audio-player",
+    "retro-neon"
   ],
   "author": "VibeForge",
   "license": "MIT",
   "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1"
   }
 }

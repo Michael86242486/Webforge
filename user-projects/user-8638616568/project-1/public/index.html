@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VIBEFORGE • Retro Neon Portfolio</title>
+   link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="scanlines"></div>
+    
+    <!-- Navigation -->
+    <nav class="nav">
+        <div class="nav-content">
+            <div class="logo">
+                <i class="fas fa-bolt"></i>
+                <span>VIBEFORGE</span>
+            </div>
+            <div class="nav-search">
+                <input type="text" id="search-input" placeholder="Search tracks...">
+                <i class="fas fa-search"></i>
+            </div>
+            <div class="nav-actions">
+                <button class="nav-btn" onclick="showProfile()">
+                    <i class="fas fa-user"></i>
+                </button>
+                <button class="nav-btn cart-btn" onclick="showCart()">
+                    <i class="fas fa-shopping-cart"></i>
+                    <span class="cart-count" id="cart-count">0</span>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Dashboard -->
+    <header class="hero">
+        <div class="hero-content">
+            <div class="neon-text">
+                <h1>VIBEFORGE</h1>
+                <p class="tagline">RETRO-NEON • INDEPENDENT MUSIC PRODUCTION</p>
+            </div>
+            <div class="stats">
+                <div class="stat">
+                    <span class="stat-number">47</span>
+                    <span class="stat-label">TRACKS</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-number">128k</span>
+                    <span class="stat-label">STREAMS</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-number">23</span>
+                    <span class="stat-label">LICENCES</span>
+                </div>
+            </div>
+        </div>
+        <div class="hero-glow"></div>
+    </header>
+
+    <!-- Interactive Audio Player Dashboard -->
+    <section class="player-dashboard">
+        <div class="section-header">
+            <h2><i class="fas fa-play-circle"></i> LIVE PREVIEW STUDIO</h2>
+            <div class="player-status">
+                <div class="status-dot"></div>
+                <span>STUDIO ONLINE</span>
+            </div>
+        </div>
+        
+        <div id="main-player">
+            <!-- Player component injected via app.js -->
+        </div>
+    </section>
+
+    <!-- Track Grid -->
+    <section class="tracks-section">
+        <div class="section-header">
+            <h2><i class="fas fa-compact-disc"></i> SIGNATURE TRACKS</h2>
+            <button class="filter-btn" onclick="filterTracks('all')">ALL</button>
+            <button class="filter-btn" onclick="filterTracks('synth')">SYNTH</button>
+            <button class="filter-btn" onclick="filterTracks('wave')">WAVE</button>
+        </div>
+        
+        <div class="track-grid" id="track-grid">
+            <!-- Populated dynamically by app.js + TrackCard.js -->
+        </div>
+    </section>
+
+    <!-- Monetization CTA -->
+    <section class="monetization">
+        <div class="glass-panel">
+            <h3>EXCLUSIVE LICENSING</h3>
+            <p>Secure stems, stems + vocals, or full commercial rights. Instant GitHub sync available for verified buyers.</p>
+            <button class="neon-btn" onclick="initiateInquiry()">REQUEST CUSTOM BEAT</button>
+        </div>
+    </section>
+
+    <!-- Cart Modal -->
+    <div class="modal" id="cart-modal">
+        <div class="modal-content glass-panel">
+            <div class="modal-header">
+                <h3><i class="fas fa-shopping-cart"></i> CART</h3>
+                <button class="close-btn" onclick="hideCart()">&times;</button>
+            </div>
+            <div id="cart-items"></div>
+            <div class="cart-total">
+                <span>TOTAL</span>
+                <span id="cart-total">$0</span>
+            </div>
+            <div class="cart-actions">
+                <button class="neon-btn secondary" onclick="hideCart()">CONTINUE BROWSING</button>
+                <button class="neon-btn" onclick="submitInquiry()">SUBMIT INQUIRY</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <p>© 2024 VIBEFORGE • SECURE • RETRO-NEON • POWERED BY NODE + EXPRESS</p>
+        <div class="socials">
+            <i class="fab fa-soundcloud"></i>
+            <i class="fab fa-spotify"></i>
+            <i class="fab fa-github"></i>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+    <script src="components/Player.js"></script>
+    <script src="components/TrackCard.js"></script>
+    <script src="components/Cart.js"></script>
+    <script src="components/Nav.js"></script>
+</body>
+</html>
