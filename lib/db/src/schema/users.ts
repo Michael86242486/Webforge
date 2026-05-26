@@ -8,6 +8,7 @@ export const usersTable = pgTable("users", {
   firstName: text("first_name"),
   tier: text("tier").notNull().default("starter"),
   apiKey: text("api_key"),
+  githubToken: text("github_token"),
   dailyActionsCounter: integer("daily_actions_counter").notNull().default(0),
   dailyActionsReset: timestamp("daily_actions_reset").defaultNow(),
   projectCount: integer("project_count").notNull().default(0),
