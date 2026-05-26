@@ -37,6 +37,32 @@ const PLATFORM_URL = (() => {
   return d ? `https://${d}` : "https://webforge.replit.app";
 })();
 
+// ─── Slug helpers ─────────────────────────────────────────────────────────────
+
+function slugify(name: string): string {
+  return name.toLowerCase().trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+}
+
+async function extractProjectName(description: string, telegramId: number): Promise<string | null> {
+  try {
+    const result = await routeTask(
+      "chat",
+      `Extract a short, memorable project name (1-3 words, no generic names like "My App" or "Web App") from this build request:\n"${description.slice(0, 400)}"\n\nReply with ONLY the project name, or "NONE" if no distinct name is evident.`,
+      "starter", telegramId, undefined
+    );
+    const raw = result.content.trim().replace(/["'`*]/g, "").split(/[\n,]/)[0]!.trim();
+    if (!raw || raw.toUpperCase() === "NONE" || raw.length > 50 || raw.includes(" ") && raw.split(" ").length > 4) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
 // ─── State Maps (entry-bot only tracks active builds + git push confirmations) ─
 // Identity, intent detection, conversation history, discovery, and pending
 // build state are all owned by Ruflo inside orchestrator.ts.
@@ -44,6 +70,15 @@ const PLATFORM_URL = (() => {
 // Tracks number of active concurrent builds per user
 const activeSessions = new Map<number, number>();
 const gitPendingPush = new Map<number, { workDir: string; projectId: number }>();
+
+// Pending naming: user must reply with a project name before build starts
+const pendingNaming = new Map<number, {
+  chatId: number;
+  plan: PlanningResult;
+  description: string;
+  tier: Tier;
+  isElite: boolean;
+}>();
 
 function activeSessionCount(userId: number): number {
   return activeSessions.get(userId) ?? 0;
@@ -167,6 +202,7 @@ async function runFullBuild(
   plan: PlanningResult,
   tier: Tier,
   isElite: boolean,
+  slug?: string,
 ): Promise<void> {
   if (!bot) return;
 
@@ -183,19 +219,27 @@ async function runFullBuild(
   }
   activeSessionAdd(telegramId);
 
+  const finalSlug = slug && slug.length > 0 ? slug : undefined;
+  const projectName = finalSlug ?? description.slice(0, 60);
+
   const [project] = await db.insert(projectsTable).values({
-    userId: telegramId, name: description.slice(0, 60),
-    description, status: "building", techStack: plan.techStack,
+    userId: telegramId,
+    name: projectName,
+    slug: finalSlug,
+    description,
+    status: "building",
+    techStack: plan.techStack,
   }).returning();
 
-  const workDir = await ensureProjectDir(project.id, telegramId);
-  await db.update(projectsTable).set({ workDir }).where(eq(projectsTable.id, project.id));
+  const workDir = await ensureProjectDir(project.id, telegramId, finalSlug);
+  await db.update(projectsTable).set({ workDir, slug: finalSlug }).where(eq(projectsTable.id, project.id));
 
   const pid = String(project.id);
-  const deployUrl = `${PLATFORM_URL}/deploying/${project.id}`;
+  const projectKey = finalSlug ?? String(project.id);
+  const deployUrl = `${PLATFORM_URL}/deploying/${projectKey}`;
 
   await safeSend(bot, chatId,
-    `🚀 *Build Started — Project #${project.id}*\n\nLive deploy page:\n${deployUrl}`,
+    `🚀 *Build Started — \`${projectKey}\`*\n\nLive deploy page:\n${deployUrl}`,
     { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "📊 Watch Live Build", url: deployUrl }]] } }
   );
 
@@ -290,7 +334,7 @@ async function runFullBuild(
     // ── Health poll ───────────────────────────────────────────────────────
     broadcastProgress(pid, 92, "Polling for HTTP response...", written, plan.manifest.length);
     let isLive = await pollAppHealth(port, 90_000);
-    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${project.id}/`;
+    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${projectKey}/`;
 
     // ── Self-Healing Autopsy (if app didn't start) ────────────────────────
     if (!isLive) {
@@ -341,7 +385,7 @@ async function runFullBuild(
 
     if (isLive) {
       await safeSend(bot, chatId,
-        `🎉 *App is LIVE — Project #${project.id}*\n\n✅ ${written} files deployed\n🔌 Port: ${port}${syntaxErrors.length ? `\n🔍 ${syntaxErrors.length} syntax issues auto-patched` : ""}\n\n🌐 *Your live app:*\n${liveUrl}`,
+        `🎉 *App is LIVE — \`${projectKey}\`*\n\n✅ ${written} files deployed\n🔌 Port: ${port}${syntaxErrors.length ? `\n🔍 ${syntaxErrors.length} syntax issues auto-patched` : ""}\n\n🌐 *Your live app:*\n${liveUrl}`,
         {
           parse_mode: "Markdown",
           reply_markup: {
@@ -352,10 +396,10 @@ async function runFullBuild(
           },
         }
       );
-      rufloAddHistory(telegramId, "assistant", `Built project #${project.id}: ${description.slice(0,100)}. Live at: ${liveUrl}`);
+      rufloAddHistory(telegramId, "assistant", `Built \`${projectKey}\` (id=${project.id}): ${description.slice(0,100)}. Live at: ${liveUrl}`);
     } else {
       await safeSend(bot, chatId,
-        `⚠️ *Build Complete — App warming up*\n\n${written} files deployed. Use \`/logs ${project.id}\` to inspect crash output.\n\n🌐 ${liveUrl}`,
+        `⚠️ *Build Complete — \`${projectKey}\` warming up*\n\n${written} files deployed. Use \`/logs ${project.id}\` to inspect crash output.\n\n🌐 ${liveUrl}`,
         { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🌐 Try URL", url: liveUrl }, { text: "📋 View Logs", callback_data: `logs_${project.id}` }]] } }
       );
     }
@@ -366,7 +410,7 @@ async function runFullBuild(
     broadcastStatus(pid, "Build failed");
     const errMsg = err instanceof Error ? err.message.slice(0, 280) : "Unknown error";
     await safeSend(bot, chatId,
-      `❌ *Build Failed — Project #${project.id}*\n\n${escapeMd(errMsg)}\n\nPlease try again with more detail.`,
+      `❌ *Build Failed — \`${projectKey}\`*\n\n${escapeMd(errMsg)}\n\nPlease try again with more detail.`,
       { parse_mode: "Markdown" }
     );
   } finally {
@@ -589,7 +633,9 @@ async function handleRestart(msg: TelegramBot.Message, projectId: number): Promi
 
     await safeSend(bot, chatId, `⏳ Polling port ${port} for HTTP response...`);
     const live = await pollAppHealth(port, 60_000);
-    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${projectId}/`;
+    const projRow = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId)).limit(1);
+    const restartKey = projRow[0]?.slug ?? String(projectId);
+    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${restartKey}/`;
 
     if (live) {
       await db.update(projectsTable).set({ status: "running", liveUrl }).where(eq(projectsTable.id, projectId));
@@ -597,8 +643,8 @@ async function handleRestart(msg: TelegramBot.Message, projectId: number): Promi
     if (msg2) await safeDelete(bot, chatId, msg2.message_id);
     await safeSend(bot, chatId,
       live
-        ? `✅ *Project #${projectId} is back online!*\n\n🌐 ${liveUrl}`
-        : `⚠️ *Project #${projectId} restarted* — still warming up.\n\n🌐 ${liveUrl}`,
+        ? `✅ *\`${restartKey}\` is back online!*\n\n🌐 ${liveUrl}`
+        : `⚠️ *\`${restartKey}\` restarted* — still warming up.\n\n🌐 ${liveUrl}`,
       { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🌐 Open App", url: liveUrl }]] } }
     );
   } catch (err) {
@@ -711,12 +757,13 @@ async function handleCloneRepo(msg: TelegramBot.Message, repoUrl: string): Promi
     const { pid: p2 } = await spawnProjectApp(workDir, proj.id, port);
     await db.update(projectsTable).set({ port, botPid: p2 ?? null, status: "running" }).where(eq(projectsTable.id, proj.id));
     const live = await pollAppHealth(port, 60_000);
-    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${proj.id}/`;
+    const cloneKey = proj.slug ?? String(proj.id);
+    const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${cloneKey}/`;
     await db.update(projectsTable).set({ liveUrl: live ? liveUrl : null, status: live ? "running" : "error" }).where(eq(projectsTable.id, proj.id));
 
     if (waitMsg) await safeDelete(bot, chatId, waitMsg.message_id);
     await safeSend(bot, chatId,
-      `✅ *Repository Cloned — Project #${proj.id}*\n\n📦 ${escapeMd(repoName)}\n🔌 Port: ${port}\n${live ? `🌐 Live: ${liveUrl}` : "⚠️ App may need a start script — check your package.json"}`,
+      `✅ *Repository Cloned — \`${cloneKey}\`*\n\n📦 ${escapeMd(repoName)}\n🔌 Port: ${port}\n${live ? `🌐 Live: ${liveUrl}` : "⚠️ App may need a start script — check your package.json"}`,
       { parse_mode: "Markdown", reply_markup: live ? { inline_keyboard: [[{ text: "🌐 Open App", url: liveUrl }]] } : undefined }
     );
     await incrementAction(telegramId);
@@ -810,11 +857,13 @@ async function handleBatch(msg: TelegramBot.Message, raw: string): Promise<void>
     { parse_mode: "Markdown" }
   );
 
-  // Fire all builds concurrently — each one is non-blocking
+  // Fire all builds concurrently — each one is non-blocking, name is extracted per-desc
   await Promise.all(
-    successful.map(({ value: { desc, plan } }) =>
-      runFullBuild(chatId, telegramId, desc, plan, tier, tier === "elite").catch(logger.error)
-    )
+    successful.map(async ({ value: { desc, plan } }) => {
+      const rawName = await extractProjectName(desc, telegramId).catch(() => null);
+      const slug = rawName ? slugify(rawName) : undefined;
+      return runFullBuild(chatId, telegramId, desc, plan, tier, tier === "elite", slug).catch(logger.error);
+    })
   );
 }
 
@@ -856,6 +905,26 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
       : `✅ *Pushed to GitHub successfully!*\n\n${escapeMd(r.stdout.slice(0, 300))}`,
       { parse_mode: "Markdown" }
     );
+    return;
+  }
+
+  // ── Intercept naming replies ───────────────────────────────────────────────
+  const namingPending = pendingNaming.get(telegramId);
+  if (namingPending) {
+    const slug = slugify(text);
+    if (!slug) {
+      await safeSend(bot, chatId,
+        `❌ That name couldn't be converted to a slug. Try a simple name like *VibeForge* or *TaskMaster*.`,
+        { parse_mode: "Markdown" }
+      );
+      return; // keep pendingNaming entry intact so user can retry
+    }
+    pendingNaming.delete(telegramId);
+    await safeSend(bot, chatId,
+      `✅ *Project name set: \`${slug}\`* — launching build now! 🚀`,
+      { parse_mode: "Markdown" }
+    );
+    runFullBuild(namingPending.chatId, telegramId, namingPending.description, namingPending.plan, namingPending.tier, namingPending.isElite, slug).catch(logger.error);
     return;
   }
 
@@ -921,7 +990,20 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
       const pc = await checkProjectLimitAllowed(telegramId);
       if (!pc.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(pc.reason ?? "Project limit reached")}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`); break; }
       await safeSend(bot, chatId, result.content, { parse_mode: "Markdown" });
-      runFullBuild(chatId, telegramId, desc, plan, tier, isElite).catch(logger.error);
+
+      // Try to extract a project name from the description automatically
+      const rawName = await extractProjectName(desc, telegramId);
+      if (rawName) {
+        const slug = slugify(rawName);
+        runFullBuild(chatId, telegramId, desc, plan, tier, isElite, slug).catch(logger.error);
+      } else {
+        // No name extracted — pause and ask the user
+        pendingNaming.set(telegramId, { chatId, plan, description: desc, tier, isElite });
+        await safeSend(bot, chatId,
+          `📛 *What would you like to call this project?*\n\nI couldn't pick a distinct name from your description. Reply with a short name (e.g. "VibeForge") and I'll start building immediately.`,
+          { parse_mode: "Markdown" }
+        );
+      }
       break;
     }
     case "billing": {
@@ -1250,7 +1332,10 @@ export function initCoreBot(): void {
         const check = await checkActionAllowed(telegramId);
         if (!check.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}`); return; }
         await safeSend(bot, chatId, "🚀 *Building now!*", { parse_mode: "Markdown" });
-        runFullBuild(chatId, telegramId, p.description, p.plan, p.tier, p.isElite).catch(logger.error);
+        // Extract name from stored description; if none found, fall back to slugified description words
+        const rawBtnName = await extractProjectName(p.description, telegramId).catch(() => null);
+        const btnSlug = rawBtnName ? slugify(rawBtnName) : slugify(p.description.split(" ").slice(0, 3).join(" "));
+        runFullBuild(chatId, telegramId, p.description, p.plan, p.tier, p.isElite, btnSlug || undefined).catch(logger.error);
         return;
       }
 

@@ -3,189 +3,90 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VibeForge • Retro-Neon Portfolio</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="css/animations.css">
-    <link rel="stylesheet" href="assets/fonts/Inter.css">
+    <title>VibeForge | Music Producer Portfolio</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="neon-grid"></div>
-    
-    <!-- Navbar -->
-    <nav class="glass-nav">
-        <div class="nav-container">
-            <div class="logo">
-                <span class="neon-text">VIBEFORGE</span>
-                <div class="logo-dot"></div>
-            </div>
-            <div class="nav-links">
-                <a href="#dashboard">Dashboard</a>
-                <a href="#tracks">Tracks</a>
-                <a href="#shop">Monetize</a>
-                <a href="#sync">Sync</a>
-            </div>
-            <div class="nav-actions">
-                <button class="neon-btn" onclick="document.getElementById('cart-modal').classList.add('active')">Cart <span id="cart-count">0</span></button>
-            </div>
+    <header class="header">
+        <div class="logo-container">
+            <h1 class="logo">VIBE<span class="neon-highlight">FORGE</span></h1>
         </div>
-    </nav>
-
-    <!-- Hero -->
-    <header class="hero">
-        <div class="hero-content">
-            <div class="status-badge">LIVE • PRODUCING SINCE 2017</div>
-            <h1 class="hero-title">VibeForge</h1>
-            <p class="hero-subtitle">Independent music producer crafting neon-soaked beats and cinematic soundscapes</p>
-            <div class="hero-actions">
-                <button class="neon-btn primary" onclick="document.getElementById('dashboard').scrollIntoView({behavior:'smooth'})">Enter Player</button>
-                <button class="neon-btn" onclick="syncGitHub()">Sync Releases</button>
-            </div>
-        </div>
-        <div class="hero-visual">
-            <div class="vinyl neon-glow"></div>
+        <nav class="nav">
+            <a href="#portfolio" class="nav-link">Portfolio</a>
+            <a href="#store" class="nav-link">Store</a>
+            <a href="#about" class="nav-link">About</a>
+            <a href="#contact" class="nav-link">Contact</a>
+        </nav>
+        <div class="cart-icon" id="cartToggle">
+            <span class="cart-symbol">🛒</span>
+            <span class="cart-count" id="cartCount">0</span>
         </div>
     </header>
 
-    <!-- Audio Dashboard -->
-    <section id="dashboard" class="section">
-        <div class="section-header">
-            <h2>Interactive Preview Dashboard</h2>
-            <p>Real-time waveform • 30s previews • Instant licensing</p>
-        </div>
-        <div class="player-container glass-panel">
-            <div id="audio-player" class="audio-player">
-                <div class="track-info">
-                    <div class="track-art neon-border">
-                        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Crect fill='%23000' width='120' height='120'/%3E%3Ctext x='60' y='70' fill='%23ff00aa' font-size='18' text-anchor='middle'%3ENIGHT%3C/text%3E%3C/svg%3E" alt="Track art">
-                    </div>
-                    <div>
-                        <div class="track-title" id="current-track">NEON NIGHTS</div>
-                        <div class="track-meta">VibeForge • 2024 • 128 BPM</div>
-                    </div>
-                </div>
-                
-                <div class="waveform-container">
-                    <canvas id="waveform" width="600" height="80"></canvas>
-                    <div class="progress-bar">
-                        <div class="progress" id="progress"></div>
-                    </div>
-                </div>
-                
-                <div class="player-controls">
-                    <button class="control-btn" onclick="prevTrack()">⏮</button>
-                    <button class="control-btn play" id="play-btn" onclick="togglePlay()">▶</button>
-                    <button class="control-btn" onclick="nextTrack()">⏭</button>
-                    <div class="volume">
-                        <input type="range" id="volume" min="0" max="1" step="0.1" value="0.8" oninput="setVolume(this.value)">
-                    </div>
-                </div>
+    <main>
+        <section class="hero">
+            <div class="hero-content">
+                <h2 class="hero-title">Crafting Beats, Forging Vibes</h2>
+                <p class="hero-subtitle">Independent music producer | Custom tracks | Sound design</p>
+                <button class="cta-button">Explore My Work</button>
             </div>
-        </div>
-    </section>
+            <div class="hero-visual">
+                <div class="waveform-placeholder"></div>
+            </div>
+        </section>
 
-    <!-- Tracks Grid -->
-    <section id="tracks" class="section">
-        <div class="section-header">
-            <h2>Featured Tracks</h2>
-            <p>Preview • License • Own</p>
-        </div>
-        <div class="tracks-grid">
-            <div class="track-card glass-panel" data-track="1">
-                <div class="track-header">
-                    <div class="track-art-small neon-border"></div>
-                    <div>
-                        <div class="track-name">Neon Nights</div>
-                        <div class="track-stats">2.4m plays • 128 BPM</div>
-                    </div>
-                </div>
-                <div class="track-actions">
-                    <button class="neon-btn small" onclick="loadTrack(0)">Preview</button>
-                    <button class="neon-btn small primary" onclick="addToCart(0)">License $49</button>
-                </div>
-            </div>
-            <div class="track-card glass-panel" data-track="2">
-                <div class="track-header">
-                    <div class="track-art-small neon-border" style="background: linear-gradient(45deg, #00f0ff, #ff00aa)"></div>
-                    <div>
-                        <div class="track-name">Midnight Drive</div>
-                        <div class="track-stats">1.8m plays • 140 BPM</div>
-                    </div>
-                </div>
-                <div class="track-actions">
-                    <button class="neon-btn small" onclick="loadTrack(1)">Preview</button>
-                    <button class="neon-btn small primary" onclick="addToCart(1)">License $39</button>
-                </div>
-            </div>
-            <div class="track-card glass-panel" data-track="3">
-                <div class="track-header">
-                    <div class="track-art-small neon-border" style="background: linear-gradient(45deg, #ff00aa, #00ff88)"></div>
-                    <div>
-                        <div class="track-name">Pulse Protocol</div>
-                        <div class="track-stats">945k plays • 135 BPM</div>
-                    </div>
-                </div>
-                <div class="track-actions">
-                    <button class="neon-btn small" onclick="loadTrack(2)">Preview</button>
-                    <button class="neon-btn small primary" onclick="addToCart(2)">License $59</button>
-                </div>
-            </div>
-        </div>
-    </section>
+        <section id="portfolio" class="portfolio-section">
+            <h2 class="section-title">🎵 My Portfolio</h2>
+            <div class="portfolio-grid" id="portfolioGrid"></div>
+        </section>
 
-    <!-- Monetization / Shop -->
-    <section id="shop" class="section">
-        <div class="section-header">
-            <h2>Monetization Hub</h2>
-            <p>Exclusive packs • Custom commissions • Sync licensing</p>
-        </div>
-        <div class="shop-grid">
-            <div class="shop-card glass-panel">
-                <h3>Neon Vault Pack</h3>
-                <p>42 stems • 12 full tracks • Unlimited commercial use</p>
-                <div class="price">$299</div>
-                <button class="neon-btn primary full" onclick="addToCart(3)">Add to Cart</button>
-            </div>
-            <div class="shop-card glass-panel">
-                <h3>Custom Beat Commission</h3>
-                <p>Personalized track delivered in 5 days</p>
-                <div class="price">$450</div>
-                <button class="neon-btn primary full" onclick="addToCart(4)">Commission</button>
-            </div>
-        </div>
-    </section>
+        <section id="store" class="store-section">
+            <h2 class="section-title">🛍️ Music Store</h2>
+            <div class="store-grid" id="storeGrid"></div>
+        </section>
 
-    <!-- GitHub Sync -->
-    <section id="sync" class="section">
-        <div class="glass-panel sync-panel">
-            <h2>Release Sync</h2>
-            <p>Connect releases to GitHub for version control and distribution tracking</p>
-            <button class="neon-btn primary" onclick="syncGitHub()">Sync with GitHub</button>
-            <div id="sync-status" class="sync-status"></div>
-        </div>
-    </section>
+        <section class="audio-player-section">
+            <h2 class="section-title">🎧 Now Playing</h2>
+            <div class="audio-player-container" id="audioPlayerContainer"></div>
+        </section>
+    </main>
 
-    <!-- Cart Modal -->
-    <div id="cart-modal" class="modal">
-        <div class="modal-content glass-panel">
-            <div class="modal-header">
-                <h3>Your Cart</h3>
-                <button onclick="document.getElementById('cart-modal').classList.remove('active')">×</button>
-            </div>
-            <div id="cart-items" class="cart-items"></div>
-            <div class="cart-footer">
-                <div class="total">Total: $<span id="cart-total">0</span></div>
-                <button class="neon-btn primary full" onclick="submitInquiry()">Submit Inquiry</button>
-            </div>
+    <div class="cart-sidebar" id="cartSidebar">
+        <div class="cart-header">
+            <h3>Your Cart</h3>
+            <button class="close-cart" id="closeCart">✕</button>
+        </div>
+        <div class="cart-items" id="cartItems"></div>
+        <div class="cart-footer">
+            <p class="cart-total">Total: <span id="cartTotal">$0.00</span></p>
+            <button class="checkout-button">Checkout</button>
         </div>
     </div>
 
     <footer class="footer">
-        <p>© VibeForge 2024 • Built with neon &amp; passion</p>
+        <div class="footer-content">
+            <div class="footer-logo">VibeForge</div>
+            <div class="footer-links">
+                <a href="#" class="footer-link">Privacy Policy</a>
+                <a href="#" class="footer-link">Terms of Service</a>
+                <a href="#" class="footer-link">GitHub</a>
+            </div>
+            <div class="footer-social">
+                <a href="#" class="social-link">🎵</a>
+                <a href="#" class="social-link">📷</a>
+                <a href="#" class="social-link">🐦</a>
+                <a href="#" class="social-link">💼</a>
+            </div>
+        </div>
+        <p class="copyright">© 2026 VibeForge. All rights reserved.</p>
     </footer>
 
-    <script src="js/audioPlayer.js"></script>
-    <script src="js/cart.js"></script>
-    <script src="js/githubSync.js"></script>
-    <script src="js/app.js"></script>
+    <script src="utils/apiClient.js"></script>
+    <script src="components/AudioPlayer.js"></script>
+    <script src="components/Cart.js"></script>
+    <script src="components/PortfolioGrid.js"></script>
+    <script src="app.js"></script>
 </body>
 </html>
