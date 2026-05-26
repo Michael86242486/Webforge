@@ -149,6 +149,45 @@ export async function routeTask(
   }
 }
 
+// ─── Force-Model Router (Tri-Brain Ensemble) ─────────────────────────────────
+// Bypasses tier selection — calls a specific model directly.
+// Used by triBrainBuildFiles for Mistral (planning), Grok-3 (synthesis), Dev-X (audit).
+
+export async function routeTaskForModel(
+  model: string,
+  prompt: string,
+  systemPrompt?: string,
+  telegramId?: number,
+  maxTokens = 8192,
+): Promise<RouterResult> {
+  const { client } = await getClientForUser(telegramId);
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: systemPrompt ?? WEBFORGE_DEFAULT_SYSTEM },
+    { role: "user", content: prompt },
+  ];
+
+  try {
+    logger.info({ model, maxTokens }, "routeTaskForModel: forced model call");
+    const completion = await client.chat.completions.create({
+      model, messages, temperature: 0.15, max_tokens: maxTokens,
+    });
+    const content = completion.choices[0]?.message?.content ?? "";
+    const inputTokens = completion.usage?.prompt_tokens ?? 0;
+    const outputTokens = completion.usage?.completion_tokens ?? 0;
+    const costs = COST_MAP[model] ?? { input: 0.50, output: 1.00 };
+    const costUsd = (inputTokens / 1_000_000) * costs.input + (outputTokens / 1_000_000) * costs.output;
+    return { content, model, inputTokens, outputTokens, costUsd };
+  } catch (err) {
+    logger.warn({ model, err }, "routeTaskForModel: primary failed — falling back to gpt-5-nano");
+    const fallback = new OpenAI({ apiKey: GATEWAY_KEY, baseURL: GATEWAY_URL });
+    const completion = await fallback.chat.completions.create({
+      model: "gpt-5-nano", messages, temperature: 0.15, max_tokens: maxTokens,
+    });
+    const content = completion.choices[0]?.message?.content ?? "";
+    return { content, model: "gpt-5-nano", inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  }
+}
+
 export interface DeepBuildResult {
   finalCode: string;
   rounds: number;

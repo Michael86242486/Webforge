@@ -8,7 +8,7 @@ import {
 import { encrypt, decrypt } from "../utils/crypto.js";
 import { recordTelemetry } from "../utils/telemetry.js";
 import { safeSend, safeEdit, sendTyping, safeDelete, escapeMd } from "../utils/telegram.js";
-import { db, usersTable, projectsTable } from "@workspace/db";
+import { db, usersTable, projectsTable, paymentsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import {
   ensureProjectDir, scaffoldBotProject, spawnBotProcess,
@@ -16,7 +16,8 @@ import {
   spawnProjectApp, pollAppHealth, assignProjectPort, findFreePort,
   syntaxAuditFiles, patchSyntaxError, generateReadme,
   gitCloneRepo, gitPushChanges, selfHealApp,
-  type PlanningResult,
+  triBrainBuildFiles,
+  type PlanningResult, type TriBrainResult,
 } from "../engines/orchestrator.js";
 import {
   broadcastProgress, broadcastRedirect, broadcastStatus, broadcastToProject,
@@ -437,60 +438,46 @@ async function runFullBuild(
     broadcastProgress(pid, 15, `${plan.manifest.length} files planned`, 0, plan.manifest.length);
     broadcastToProject(pid, { type: "round", round: "Plan", maxRounds: isElite ? 5 : 1, message: plan.summary });
 
-    // ── Code generation ───────────────────────────────────────────────────
-    const codePrompt = buildCodePrompt(description, plan);
-    let finalCode = "";
-
-    if (isElite) {
-      broadcastProgress(pid, 20, "DeepBuild round 1 — generating code...", 0, plan.manifest.length);
-      const deepResult = await deepBuildLoop(codePrompt, telegramId, WEBFORGE_SYSTEM_PROMPT, 5,
-        (round, max, issues) => {
-          broadcastProgress(pid, 20 + (round / max) * 38, `DeepBuild round ${round}/${max}`, 0, plan.manifest.length);
-          broadcastToProject(pid, { type: "round", round, maxRounds: max, message: issues.length ? `${issues.length} issue(s) correcting...` : "Clean ✓" });
-          safeSend(bot!, chatId, `🔄 *Round ${round}/${max}* — ${issues.length ? `${issues.length} issue(s) self-correcting...` : "Clean pass ✓"}`, { parse_mode: "Markdown" });
-        },
-      );
-      finalCode = deepResult.finalCode;
-      await safeSend(bot, chatId,
-        `✅ *DeepBuild Complete*\n*Rounds:* ${deepResult.rounds} | *Cost:* $${deepResult.totalCostUsd.toFixed(4)}\n\nWriting ${plan.manifest.length} files...`,
-        { parse_mode: "Markdown" }
-      );
-      recordTelemetry({
-        sessionId: pid, userId: telegramId, action: "deepbuild", model: deepResult.model,
-        inputTokens: deepResult.totalInputTokens, outputTokens: deepResult.totalOutputTokens,
-        costUsd: deepResult.totalCostUsd,
-      }).catch(() => {});
-    } else {
-      broadcastProgress(pid, 20, "Generating application code...", 0, plan.manifest.length);
-      const result = await routeTask("coding", codePrompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
-      finalCode = result.content;
-      await safeSend(bot, chatId,
-        `✅ *Code Generated* — $${result.costUsd.toFixed(4)}\n\nWriting files...`,
-        { parse_mode: "Markdown" }
-      );
-      recordTelemetry({
-        sessionId: pid, userId: telegramId, action: "coding", model: result.model,
-        inputTokens: result.inputTokens, outputTokens: result.outputTokens,
-        costUsd: result.costUsd,
-      }).catch(() => {});
-    }
-
-    // ── Write files ───────────────────────────────────────────────────────
-    broadcastProgress(pid, 62, "Writing files to disk...", 0, plan.manifest.length);
-
-    // Integrity retry function — escalates to deepseek-r1 / grok-3
-    const integrityRetryFn = async (filename: string, description: string, attempt: number): Promise<string> => {
-      const retryModel = attempt === 1 ? "deepseek-r1" : "grok-3";
-      console.log(`[Integrity Gate] 🔁 Escalating to ${retryModel} for ${filename} (attempt ${attempt})`);
-      const strictPrompt = `You failed to write complete code for "${filename}". Rewrite the full operational source code now. Do not return placeholders, comments-only files, or empty content.\n\nFile purpose: ${description}\nApp context: ${description}\n\nReturn ONLY the complete file content — no markdown formatting, no explanation.`;
-      const r = await routeTask("coding", strictPrompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
-      return r.content;
-    };
-
-    const written = await buildProjectFiles(workDir, finalCode, pid, plan.manifest,
-      (n, f) => broadcastProgress(pid, 62 + (n / Math.max(plan.manifest.length, 1)) * 12, `Writing ${path.basename(f)}`, n, plan.manifest.length),
-      integrityRetryFn,
+    // ── Tri-Brain Ensemble: Mistral planned, Grok-3 per-file, Dev-X audit ───
+    // Phase 1 (Mistral planning) already completed above via planningMode.
+    // Phase 2 (Grok-3) + Phase 3 (Dev-X) happen here per-file.
+    broadcastProgress(pid, 20, `Phase 2: Grok-3 synthesizing ${plan.manifest.length} files...`, 0, plan.manifest.length);
+    await safeSend(bot, chatId,
+      `🧠 *Tri-Brain Activated*\n\n` +
+      `✅ Mistral designed the architecture\n` +
+      `⚡ Grok-3 synthesizing each file (${plan.manifest.length} files)...\n` +
+      `🛡️ Dev-X will audit JS files before write`,
+      { parse_mode: "Markdown" }
     );
+
+    const triBrainResult: TriBrainResult = await triBrainBuildFiles(
+      workDir, description, plan, telegramId,
+      (n, total, filePath, phase) => {
+        const pct = 20 + (n / Math.max(total, 1)) * 55;
+        broadcastProgress(pid, pct, `${phase}: ${path.basename(filePath)}`, n, total);
+        broadcastToProject(pid, {
+          type: "round", round: n, maxRounds: total,
+          message: `[${phase}] Written: ${filePath}`,
+        });
+      },
+    );
+
+    const written = triBrainResult.written;
+
+    await safeSend(bot, chatId,
+      `✅ *Tri-Brain Synthesis Complete*\n` +
+      `📁 *${written} files written* — Cost: $${triBrainResult.totalCostUsd.toFixed(4)}` +
+      (triBrainResult.phaseErrors.length > 0
+        ? `\n⚠️ ${triBrainResult.phaseErrors.length} phase error(s) — fallback stubs used`
+        : "\n🟢 All files synthesized cleanly"),
+      { parse_mode: "Markdown" }
+    );
+
+    recordTelemetry({
+      sessionId: pid, userId: telegramId, action: "tribrain_build",
+      model: "grok-3+dev-x", inputTokens: 0, outputTokens: 0,
+      costUsd: triBrainResult.totalCostUsd,
+    }).catch(() => {});
 
     // ── Syntax audit loop ─────────────────────────────────────────────────
     broadcastProgress(pid, 75, "Running syntax audit...", written, plan.manifest.length);
@@ -1295,6 +1282,74 @@ export function initCoreBot(): void {
     if (statusMsg) await safeDelete(bot!, msg.chat.id, statusMsg.message_id);
     await safeSend(bot!, msg.chat.id,
       `✅ *Broadcast Complete*\n\n📬 Delivered: ${sent}\n❌ Failed: ${failed}\n👥 Total: ${allUsers.length}`,
+      { parse_mode: "Markdown" }
+    );
+  }));
+
+  // ── Admin-only: /refund ────────────────────────────────────────────────────
+  // Usage: /refund <reference> [reason]
+  bot.onText(/\/refund(?:\s+(\S+))?(?:\s+([\s\S]+))?/, safeHandler(async (msg, match) => {
+    if (msg.from!.id !== ADMIN_TELEGRAM_ID) return;
+    const chatId = msg.chat.id;
+    const reference = match?.[1]?.trim();
+    const reason = match?.[2]?.trim() ?? "Refund issued by admin";
+
+    if (!reference) {
+      await safeSend(bot!, chatId,
+        `💸 *Refund Usage*\n\n/refund <reference> [reason]\n\nExample:\n/refund WF-ABC123 Duplicate payment`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    // Look up the payment by reference
+    const [payment] = await db
+      .select()
+      .from(paymentsTable)
+      .where(eq(paymentsTable.reference, reference))
+      .limit(1);
+
+    if (!payment) {
+      await safeSend(bot!, chatId, `❌ No payment found with reference *${escapeMd(reference)}*`, { parse_mode: "Markdown" });
+      return;
+    }
+
+    if (payment.status === "refunded") {
+      await safeSend(bot!, chatId,
+        `⚠️ Payment *${escapeMd(reference)}* is already marked as refunded.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    // Mark as refunded
+    await db
+      .update(paymentsTable)
+      .set({ status: "refunded" })
+      .where(eq(paymentsTable.reference, reference));
+
+    // Notify the user
+    try {
+      await safeSend(bot!, payment.userId,
+        `💸 *Payment Refund Notice*\n\n` +
+        `Your payment *${escapeMd(reference)}* (₦${payment.amountNgn.toLocaleString()}) has been refunded.\n\n` +
+        `*Reason:* ${escapeMd(reason)}\n\n` +
+        `If you have questions, please contact support.`,
+        { parse_mode: "Markdown" }
+      );
+    } catch {
+      // User may have blocked the bot — log but don't fail
+      logger.warn({ userId: payment.userId, reference }, "/refund: could not notify user");
+    }
+
+    await safeSend(bot!, chatId,
+      `✅ *Refund Processed*\n\n` +
+      `📋 *Reference:* ${escapeMd(reference)}\n` +
+      `💰 *Amount:* ₦${payment.amountNgn.toLocaleString()}\n` +
+      `🎯 *Tier:* ${payment.tier}\n` +
+      `👤 *User ID:* ${payment.userId}\n` +
+      `📝 *Reason:* ${escapeMd(reason)}\n\n` +
+      `User has been notified.`,
       { parse_mode: "Markdown" }
     );
   }));

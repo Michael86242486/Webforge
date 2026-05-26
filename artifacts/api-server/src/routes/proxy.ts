@@ -77,15 +77,39 @@ router.use("/preview-proxy/:projectId", async (req: Request, res: Response, next
       changeOrigin: true,
       pathRewrite: { [`^/api/preview-proxy/${projectId}`]: "" },
       on: {
-        error: (_err, _req, res) => {
-          if (res && "status" in res) {
-            (res as Response).status(502).send(`<!DOCTYPE html>
+        error: (_err, rawReq, res) => {
+          if (!res || !("status" in res)) return;
+          const expressRes = res as Response;
+          // Detect API requests (Accept: application/json or /api/ path)
+          const rawUrl = (rawReq as { url?: string }).url ?? "";
+          const acceptHeader = (rawReq as { headers?: Record<string, string> }).headers?.accept ?? "";
+          const isApiRequest = rawUrl.includes("/api/") || acceptHeader.includes("application/json");
+
+          if (isApiRequest) {
+            // Return structured JSON fallback — lets the frontend show a helpful error state
+            // instead of freezing with "API unavailable"
+            expressRes.status(200).json({
+              success: false,
+              status: "CRASHED",
+              error: "Sandbox runtime unavailable — app may be starting up or crashed",
+              port: targetPort,
+              projectId,
+              ts: new Date().toISOString(),
+            });
+          } else {
+            expressRes.status(502).send(`<!DOCTYPE html>
 <html><head><meta charset="UTF-8"/><meta http-equiv="refresh" content="3"/>
 <title>Connecting...</title>
-<style>body{font-family:sans-serif;background:#0a0e14;color:#cdd9e5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:10px;}
+<style>body{font-family:-apple-system,sans-serif;background:#0a0e14;color:#cdd9e5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:10px;}
 .s{width:28px;height:28px;border:3px solid #1e2d45;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg)}}</style>
-</head><body><div class="s"></div><p>Connecting to your app on port ${targetPort}...</p></body></html>`);
+@keyframes spin{to{transform:rotate(360deg)}}
+p{color:#6e7f96;font-size:14px;text-align:center;max-width:300px}
+small{color:#3e4f63;font-size:11px;margin-top:8px}</style>
+</head><body>
+<div class="s"></div>
+<p>Connecting to your app on port ${targetPort}...</p>
+<small>Auto-refreshing every 3 seconds</small>
+</body></html>`);
           }
         },
       },

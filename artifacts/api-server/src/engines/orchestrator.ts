@@ -6,6 +6,7 @@ import fsSync from "fs";
 import path from "path";
 import { logger } from "../lib/logger.js";
 import { recordFileDiff } from "../utils/telemetry.js";
+import { routeTaskForModel } from "../ai/router.js";
 
 const execAsync = promisify(exec);
 
@@ -279,6 +280,8 @@ export interface PlanningResult {
   manifest: FilePlan[];
   techStack: string;
   summary: string;
+  colorScheme?: string;
+  designSystem?: string;
 }
 
 // ─── Planning JSON Repair Utilities ──────────────────────────────────────────
@@ -363,14 +366,14 @@ RULES:
   let techStack = "Node.js + Express";
   let summary = userPrompt.slice(0, 80);
 
-  const attemptParse = (raw: string): { manifest: FilePlan[]; techStack: string; summary: string } | null => {
+  const attemptParse = (raw: string): { manifest: FilePlan[]; techStack: string; summary: string; colorScheme?: string; designSystem?: string } | null => {
     if (!raw || raw.trim().length < 10) return null;
 
     // ① Strip markdown fences if the model disobeyed
     let cleaned = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
 
     // ② Try direct parse first
-    let parsed: { techStack?: string; summary?: string; files?: FilePlan[] } | null = null;
+    let parsed: { techStack?: string; summary?: string; files?: FilePlan[]; colorScheme?: string; designSystem?: string } | null = null;
     try {
       const match = cleaned.match(/\{[\s\S]*\}/);
       if (match) parsed = JSON.parse(match[0]);
@@ -398,6 +401,8 @@ RULES:
         manifest: validFiles,
         techStack: parsed.techStack ?? techStack,
         summary: parsed.summary ?? summary,
+        colorScheme: parsed.colorScheme,
+        designSystem: parsed.designSystem,
       };
     }
 
@@ -406,20 +411,55 @@ RULES:
     const scanned = extractFilePathsFromLines(raw);
     if (scanned.length > 0) {
       console.log(`[Planning] 📂 Line scanner found ${scanned.length} paths`);
-      return { manifest: scanned, techStack, summary };
+      return { manifest: scanned, techStack, summary, colorScheme: undefined, designSystem: undefined };
     }
 
     return null;
   };
 
-  // ── Run primary call ───────────────────────────────────────────────────────
+  // ── Phase 1: Mistral Creative Architect ───────────────────────────────────
+  const mistralArchitectPrompt = `You are the Creative Architect for a web application. Design the project structure and aesthetic — do NOT write any source code.
+
+User wants to build: "${userPrompt}"
+
+Return ONLY valid JSON (no markdown fences, no prose, no explanation):
+{
+  "techStack": "Node.js + Express",
+  "summary": "One sentence describing the app",
+  "colorScheme": "Dark background #0a0e14, primary accent #58a6ff (electric blue), success #3fb950, text #cdd9e5 (light gray), error #f85149 (red)",
+  "designSystem": "Glassmorphism cards with backdrop-filter blur, smooth CSS transitions (0.3s ease), Inter font, bold section headings, gradient CTAs, animated hover states",
+  "files": [
+    { "path": "package.json", "description": "Node.js manifest with start script" },
+    { "path": "src/index.js", "description": "Express server, listens on process.env.PORT" },
+    { "path": "public/index.html", "description": "Main HTML with beautiful dark themed UI" },
+    { "path": "public/style.css", "description": "Production CSS: glassmorphism, animations, responsive grid" },
+    { "path": "public/app.js", "description": "Frontend JavaScript: API calls, dynamic UI updates" }
+  ]
+}
+
+RULES:
+- Use plain JavaScript (CommonJS require/module.exports) — NO TypeScript, NO ES modules
+- package.json must have: { "scripts": { "start": "node src/index.js" } }
+- Server must read process.env.PORT
+- Target 8-14 files for a complete, production-quality app
+- Make colorScheme and designSystem specific and beautiful for this particular app type
+- Return ONLY the JSON object — no markdown, no explanation before or after`;
+
   try {
-    const result = await routeTaskFn("planning", planPrompt, tier, telegramId);
-    rawContent = result.content;
-    console.log(`[Planning] Primary call returned ${rawContent.length} chars`);
-    logger.info({ contentLen: rawContent.length }, "planningMode: primary AI response received");
-  } catch (err) {
-    logger.warn({ err }, "planningMode: primary call failed");
+    const mistralResult = await routeTaskForModel("mistral", mistralArchitectPrompt, undefined, telegramId, 4096);
+    rawContent = mistralResult.content;
+    console.log(`[Planning] 🏛️ Mistral Architect returned ${rawContent.length} chars`);
+    logger.info({ contentLen: rawContent.length }, "planningMode: Mistral Architect response received");
+  } catch (mistralErr) {
+    logger.warn({ mistralErr }, "planningMode: Mistral failed — falling back to routeTaskFn");
+    try {
+      const result = await routeTaskFn("planning", planPrompt, tier, telegramId);
+      rawContent = result.content;
+      console.log(`[Planning] Fallback call returned ${rawContent.length} chars`);
+      logger.info({ contentLen: rawContent.length }, "planningMode: fallback response received");
+    } catch (err) {
+      logger.warn({ err }, "planningMode: all planning calls failed");
+    }
   }
 
   // ── Try to extract a valid manifest ───────────────────────────────────────
@@ -620,6 +660,180 @@ export async function buildProjectFiles(
   console.log(`[BuildFiles] 📦 Build complete — ${written} files, ~${totalCost} chars, estimated cost ~$${estimatedCost.toFixed(4)}`);
 
   return written;
+}
+
+// ─── Tri-Brain Ensemble — Per-File Synthesis Engine ──────────────────────────
+
+export interface TriBrainResult {
+  written: number;
+  totalCostUsd: number;
+  phaseErrors: string[];
+}
+
+/**
+ * Tri-Brain Build Pipeline:
+ *   Phase 2 — Grok-3 synthesizes each file individually (dedicated 8192-token window per file)
+ *   Phase 3 — Dev-X audits and repairs JS/TS files before writing to disk
+ *
+ * Eliminates truncation (each file gets full context window) and context contamination
+ * (each file prompt is scoped to that file only).
+ */
+export async function triBrainBuildFiles(
+  workDir: string,
+  projectDescription: string,
+  plan: PlanningResult,
+  telegramId: number,
+  onFileWritten: (written: number, total: number, filePath: string, phase: string) => void,
+): Promise<TriBrainResult> {
+  const manifest = plan.manifest;
+  const colorScheme = plan.colorScheme
+    ?? "Dark background #0a0e14, primary accent #58a6ff (electric blue), success #3fb950, text #cdd9e5";
+  const designSystem = plan.designSystem
+    ?? "Glassmorphism cards with backdrop-filter blur, smooth CSS transitions (0.3s ease), Inter font, bold headings, gradient CTAs";
+  const fileIndex = manifest.map(f => `  - ${f.path}: ${f.description}`).join("\n");
+
+  let written = 0;
+  let totalCostUsd = 0;
+  const phaseErrors: string[] = [];
+
+  const grokSystemPrompt =
+    "You are an expert full-stack developer. Write complete, production-ready code. " +
+    "Never truncate output, never use TODO comments, never write placeholder stubs. " +
+    "Every file must be 100% functional and complete.";
+
+  for (let i = 0; i < manifest.length; i++) {
+    const file = manifest[i];
+    const isShortFile = /\.(md|env|gitignore|txt)$/i.test(file.path);
+
+    // ── Phase 2: Grok-3 per-file code synthesis ───────────────────────────
+    console.log(`[TriBrain] 🧠 Grok-3 → ${file.path} (${i + 1}/${manifest.length})`);
+
+    const grokPrompt =
+      `Write the COMPLETE source code for one specific file in a web application.\n\n` +
+      `PROJECT: "${projectDescription}"\n` +
+      `TECH STACK: ${plan.techStack}\n` +
+      `COLOR SCHEME: ${colorScheme}\n` +
+      `DESIGN SYSTEM: ${designSystem}\n\n` +
+      `ALL FILES IN THIS PROJECT (context only — do NOT write these):\n${fileIndex}\n\n` +
+      `YOUR FILE TO WRITE:\n` +
+      `  PATH: ${file.path}\n` +
+      `  PURPOSE: ${file.description}\n\n` +
+      `MANDATORY RULES:\n` +
+      `- Return ONLY raw file content — zero markdown fences, zero explanation, zero headers\n` +
+      `- CommonJS ONLY for .js files (require/module.exports) — never use import/export\n` +
+      `- Server .js files MUST include: const PORT = process.env.PORT || 3000;\n` +
+      `- HTML files: complete DOCTYPE, beautiful inline or linked CSS, working JS\n` +
+      `- CSS files: minimum 60 lines of real styles — gradients, transitions, hover effects, responsive grid\n` +
+      `- package.json: must have "scripts": { "start": "node src/index.js" } and all needed dependencies\n` +
+      `- NEVER write placeholder text, skeleton code, or "// fill in later"\n` +
+      `- Apply the COLOR SCHEME and DESIGN SYSTEM to all visual output (HTML/CSS)\n` +
+      `- Minimum 30 lines of working code`;
+
+    let content = "";
+    try {
+      const grokResult = await routeTaskForModel("grok-3", grokPrompt, grokSystemPrompt, telegramId, 8192);
+      content = grokResult.content
+        .replace(/^```[\w\s]*\n?/m, "")
+        .replace(/\n?```\s*$/m, "")
+        .trim();
+      totalCostUsd += grokResult.costUsd;
+      console.log(`[TriBrain] ✓ Grok-3 wrote ${content.length} chars for ${file.path}`);
+    } catch (grokErr) {
+      const errMsg = `Grok-3 failed for ${file.path}: ${String(grokErr).slice(0, 120)}`;
+      phaseErrors.push(errMsg);
+      logger.warn({ file: file.path, err: grokErr }, "triBrainBuildFiles: Grok-3 error");
+      content = generateStubContent(file.path, file.description, plan.techStack);
+    }
+
+    // ── Integrity gate ────────────────────────────────────────────────────
+    if (!isShortFile && content.trim().length < 80) {
+      console.log(`[TriBrain] ❌ Integrity fail for ${file.path} (${content.length} chars) — escalating to Dev-X`);
+      const repairPrompt =
+        `The file "${file.path}" is critically incomplete. ` +
+        `Write complete, production-ready source code for it now.\n\n` +
+        `FILE PURPOSE: ${file.description}\n` +
+        `PROJECT: "${projectDescription}"\n` +
+        `TECH STACK: ${plan.techStack}\n\n` +
+        `Return ONLY the complete file content. No markdown, no explanation.`;
+      try {
+        const repairResult = await routeTaskForModel("dev-x", repairPrompt, grokSystemPrompt, telegramId, 8192);
+        const repaired = repairResult.content
+          .replace(/^```[\w\s]*\n?/m, "")
+          .replace(/\n?```\s*$/m, "")
+          .trim();
+        if (repaired.length > content.length) {
+          content = repaired;
+          totalCostUsd += repairResult.costUsd;
+          console.log(`[TriBrain] 🔧 Dev-X integrity repair → ${repaired.length} chars for ${file.path}`);
+        }
+      } catch (repairErr) {
+        phaseErrors.push(`Dev-X repair failed for ${file.path}: ${String(repairErr).slice(0, 80)}`);
+      }
+    }
+
+    // ── Phase 3: Dev-X pre-flight syntax audit (JS/TS files only) ────────
+    const needsAudit = /\.(js|ts|mjs|cjs)$/i.test(file.path) && content.trim().length > 100;
+    let phase = "Grok-3";
+    if (needsAudit) {
+      const auditPrompt =
+        `You are a JavaScript/TypeScript syntax auditor. Review the file below for syntax errors: ` +
+        `unclosed strings, missing closing braces/brackets, truncated code, undefined variables. ` +
+        `Fix any issues and return the COMPLETE corrected file.\n\n` +
+        `FILE: ${file.path}\n\n` +
+        `RULES:\n` +
+        `- Return ONLY the complete corrected file content — no markdown, no explanation\n` +
+        `- If the code is already correct, return it unchanged\n` +
+        `- Never shorten or summarize — return the full file\n\n` +
+        `CODE:\n${content}`;
+      try {
+        const auditResult = await routeTaskForModel("dev-x", auditPrompt, undefined, telegramId, 8192);
+        const audited = auditResult.content
+          .replace(/^```[\w\s]*\n?/m, "")
+          .replace(/\n?```\s*$/m, "")
+          .trim();
+        // Only use Dev-X output if sanity check passes (not significantly shorter)
+        if (audited.length >= content.length * 0.75 && audited.length > 50) {
+          content = audited;
+          totalCostUsd += auditResult.costUsd;
+          phase = "Grok-3 + Dev-X";
+          console.log(`[TriBrain] 🛡️ Dev-X audited ${file.path} → ${audited.length} chars`);
+        }
+      } catch (auditErr) {
+        // Silent — keep Grok-3 output; audit failure is non-fatal
+        logger.warn({ file: file.path, err: auditErr }, "triBrainBuildFiles: Dev-X audit failed (non-fatal)");
+      }
+    }
+
+    // ── Write to disk ─────────────────────────────────────────────────────
+    const absPath = path.join(workDir, file.path);
+    await fs.mkdir(path.dirname(absPath), { recursive: true });
+    await fs.writeFile(absPath, content, "utf8");
+    recordFileDiff(String(telegramId), file.path, content).catch(() => {});
+    written++;
+    onFileWritten(written, manifest.length, file.path, phase);
+    console.log(`[TriBrain] ✅ ${written}/${manifest.length} — ${file.path} (${content.length} chars) [${phase}]`);
+  }
+
+  logger.info({ written, totalCostUsd, errors: phaseErrors.length }, "triBrainBuildFiles: complete");
+  return { written, totalCostUsd, phaseErrors };
+}
+
+/** Generates minimal working stub content when all AI calls fail for a specific file */
+function generateStubContent(filePath: string, description: string, techStack: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  if (filePath.endsWith("package.json")) {
+    return JSON.stringify({
+      name: "webforge-app", version: "1.0.0",
+      scripts: { start: "node src/index.js" },
+      dependencies: { express: "^4.18.2" },
+    }, null, 2);
+  }
+  if (ext === "json") return "{}";
+  if (ext === "html") return `<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>App</title></head>\n<body><h1>${description}</h1></body>\n</html>`;
+  if (ext === "css") return `/* ${description} */\nbody { font-family: -apple-system, sans-serif; background: #0a0e14; color: #cdd9e5; margin: 0; padding: 20px; }\nh1 { color: #58a6ff; }\n`;
+  if (ext === "md") return `# ${description}\n\nBuilt with WebForge.\n\nTech: ${techStack}\n`;
+  // JS/TS fallback
+  return `// ${filePath} — ${description}\n// WebForge generated stub (${techStack})\n'use strict';\nconst express = require('express');\nconst app = express();\nconst PORT = process.env.PORT || 3000;\napp.use(express.json());\napp.get('/', (req, res) => res.send('${description}'));\napp.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));\napp.listen(PORT, () => console.log(\`[WebForge] Running on port \${PORT}\`));\nmodule.exports = app;\n`;
 }
 
 // ─── Fallback App Generator ───────────────────────────────────────────────────
