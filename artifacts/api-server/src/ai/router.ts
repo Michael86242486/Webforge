@@ -7,7 +7,7 @@ import { logger } from "../lib/logger.js";
 const GATEWAY_URL = process.env.AI_GATEWAY_URL ?? "https://aimodelapi.onrender.com/v1";
 const GATEWAY_KEY = process.env.AI_GATEWAY_KEY ?? "";
 
-export type TaskType = "planning" | "coding" | "fixing" | "chat" | "image" | "ui";
+export type TaskType = "planning" | "coding" | "fixing" | "chat" | "image" | "ui" | "backend" | "audit";
 
 const WEBFORGE_DEFAULT_SYSTEM = `You are WebForge — an elite autonomous AI platform engine. You ONLY discuss software, app building, and the WebForge platform.
 
@@ -19,13 +19,23 @@ HARD RULES:
 - If someone asks who you are: "I am WebForge — an autonomous build engine. Describe what you want to build."
 - Keep responses concise, direct, and action-oriented.`;
 
+// ─── Swarm Task-to-Model Routing Map ──────────────────────────────────────────
+// Aligned with swarm dispatch conventions:
+//   backend  → Grok-3 (multi-file Express architecture, data flows, API design)
+//   ui       → Mistral (retro-neon frontend, layout sheets, interactive elements)
+//   audit    → Dev-X  (code safety, syntax checks, pre-flight self-healing patches)
+//   planning → DeepSeek-R1 / Kimi-K2 (architect-level reasoning)
+//   coding   → Dev-X → gpt-oss-120b → Grok-3 (general synthesis, ordered by cost)
+//   fixing   → Dev-X → gpt-5-nano → gemini-2.5-flash-lite (patch application)
 const TASK_MODEL_MAP: Record<TaskType, string[]> = {
   planning: ["deepseek-r1", "kimi-k2-thinking"],
+  backend:  ["grok-3", "gpt-oss-120b", "dev-x"],
   coding:   ["dev-x", "gpt-oss-120b", "grok-3"],
+  audit:    ["dev-x", "gpt-5-nano", "gemini-2.5-flash-lite"],
   fixing:   ["dev-x", "gpt-5-nano", "gemini-2.5-flash-lite"],
   chat:     ["gpt-5-nano", "gemini-2.5-flash-lite", "mistral"],
   image:    ["image-gen"],
-  ui:       ["grok-3-mini", "llama-3.3-70b-instruct"],
+  ui:       ["mistral", "grok-3-mini", "llama-3.3-70b-instruct"],
 };
 
 const STARTER_MODELS = new Set(["gpt-5-nano", "gemini-2.5-flash-lite", "mistral"]);

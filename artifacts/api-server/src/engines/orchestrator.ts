@@ -13,6 +13,71 @@ const execAsync = promisify(exec);
 export const PROJECTS_BASE_DIR = process.env.PROJECTS_BASE_DIR ?? "/home/runner/workspace/user-projects";
 const PORT_RANGE_START = parseInt(process.env.PORT_RANGE_START ?? "5100");
 
+// ─── Swarm Parallel Dispatch ───────────────────────────────────────────────────
+// Inspired by ruflo's swarm coordination pattern: dispatch independent task groups
+// in parallel using Promise.allSettled so a single agent failure never blocks the
+// full build. Each agent runs its own model-routed call concurrently; results are
+// collected and settled results are returned.
+//
+// ruflo tool-group → WebForge model routing:
+//   agent_/swarm_/task_  → backend  (Grok-3: multi-file Express architecture)
+//   ui / layout          → ui       (Mistral: retro-neon frontend components)
+//   hooks_/analyze_      → audit    (Dev-X: code safety, syntax pre-flight)
+
+export interface SwarmAgent {
+  id: string;
+  taskType: TaskType;
+  prompt: string;
+  tier?: string;
+  telegramId?: number;
+}
+
+export interface SwarmResult {
+  id: string;
+  status: "fulfilled" | "rejected";
+  content?: string;
+  model?: string;
+  error?: string;
+}
+
+export async function swarmDispatch(agents: SwarmAgent[]): Promise<SwarmResult[]> {
+  logger.info({ agentCount: agents.length }, "swarmDispatch: launching parallel agent swarm");
+
+  const settled = await Promise.allSettled(
+    agents.map(agent =>
+      routeTask(agent.taskType, agent.prompt, agent.tier ?? "elite", agent.telegramId)
+        .then(result => ({ id: agent.id, content: result.content, model: result.model }))
+    )
+  );
+
+  return settled.map((outcome, i) => {
+    const agent = agents[i]!;
+    if (outcome.status === "fulfilled") {
+      logger.info({ id: agent.id, model: outcome.value.model }, "swarmDispatch: agent fulfilled");
+      return { id: agent.id, status: "fulfilled" as const, content: outcome.value.content, model: outcome.value.model };
+    } else {
+      const errMsg = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+      logger.warn({ id: agent.id, error: errMsg }, "swarmDispatch: agent rejected — continuing swarm");
+      return { id: agent.id, status: "rejected" as const, error: errMsg };
+    }
+  });
+}
+
+// ─── Spawn Error Cleanup ───────────────────────────────────────────────────────
+// Adapted from openclaw's cleanupFailedAcpSpawn pattern:
+// When a project process fails to start, clean up its log files and reset state
+// rather than leaving orphaned resources. Best-effort only — never throws.
+
+export async function cleanupFailedSpawn(workDir: string, projectId: number): Promise<void> {
+  const filesToClean = ["app.stdout.log", "app.stderr.log"];
+  await Promise.allSettled(
+    filesToClean.map(f =>
+      fs.unlink(path.join(workDir, f)).catch(() => {})
+    )
+  );
+  logger.info({ projectId, workDir }, "cleanupFailedSpawn: log files cleared");
+}
+
 // ─── Port Management ──────────────────────────────────────────────────────────
 
 function isPortFree(port: number): Promise<boolean> {
@@ -358,6 +423,7 @@ JSON format:
 RULES:
 - Use plain JavaScript (CommonJS require/exports) — NO TypeScript, NO ES modules
 - package.json must have: { "scripts": { "start": "node src/index.js" } }
+- Server MUST bind to 0.0.0.0 explicitly: app.listen(PORT, '0.0.0.0', () => { ... })
 - Server must use process.env.PORT
 - Target 8-14 files for a complete app
 - Return ONLY the JSON object — no markdown fences, no explanation before or after`;
@@ -441,6 +507,7 @@ Return ONLY valid JSON (no markdown fences, no prose, no explanation):
 RULES:
 - Use plain JavaScript (CommonJS require/module.exports) — NO TypeScript, NO ES modules
 - package.json must have: { "scripts": { "start": "node src/index.js" } }
+- Server MUST bind to 0.0.0.0 explicitly: app.listen(PORT, '0.0.0.0', () => { ... })
 - Server must read process.env.PORT
 - Target 8-14 files for a complete, production-quality app
 - Make colorScheme and designSystem specific and beautiful for this particular app type
