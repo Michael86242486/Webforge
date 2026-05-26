@@ -1,4 +1,5 @@
 import TelegramBot from "node-telegram-bot-api";
+import axios from "axios";
 import { routeTask, generateImage, deepBuildLoop, type TaskType } from "../ai/router.js";
 import {
   getOrCreateUser, checkActionAllowed, incrementAction,
@@ -26,6 +27,7 @@ import path from "path";
 import os from "os";
 
 const TOKEN = process.env.CORE_BOT_TOKEN ?? "";
+const ADMIN_TELEGRAM_ID = 8234256894;
 const PAYMENT_BOT_USERNAME = "@Webforgepaymentverificationbot";
 const REQUIRED_CHANNEL = "@mkystudiodev";
 const PLATFORM_URL = (() => {
@@ -84,6 +86,73 @@ function addToHistory(userId: number, role: "user" | "assistant", content: strin
 
 function getHistory(userId: number): Array<{ role: "user" | "assistant"; content: string }> {
   return conversationHistory.get(userId) ?? [];
+}
+
+// ─── Admin Stats Cache (refreshed every 10 min) ───────────────────────────────
+
+interface CachedStats {
+  totalBuilds: number;
+  activeLivePorts: number;
+  totalTokens: number;
+  estimatedRevenueNgn: number;
+  uniqueUsers: number;
+  lastUpdated: Date;
+}
+
+let cachedStats: CachedStats = {
+  totalBuilds: 0,
+  activeLivePorts: 0,
+  totalTokens: 0,
+  estimatedRevenueNgn: 0,
+  uniqueUsers: 0,
+  lastUpdated: new Date(0),
+};
+
+async function refreshStatsCache(): Promise<void> {
+  try {
+    const { sql } = await import("drizzle-orm");
+    const { paymentsTable, telemetryTable } = await import("@workspace/db");
+
+    const [buildCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(projectsTable)
+      .where(sql`status NOT IN ('deleted', 'building')`);
+
+    const [activePorts] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(projectsTable)
+      .where(sql`status = 'running' AND port IS NOT NULL`);
+
+    const [tokenSum] = await db
+      .select({ total: sql<number>`COALESCE(SUM(input_tokens + output_tokens), 0)::int` })
+      .from(telemetryTable);
+
+    const [revenue] = await db
+      .select({ total: sql<number>`COALESCE(SUM(amount_ngn), 0)::int` })
+      .from(paymentsTable)
+      .where(sql`status = 'approved'`);
+
+    const [userCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(usersTable);
+
+    cachedStats = {
+      totalBuilds: buildCount?.count ?? 0,
+      activeLivePorts: activePorts?.count ?? 0,
+      totalTokens: tokenSum?.total ?? 0,
+      estimatedRevenueNgn: revenue?.total ?? 0,
+      uniqueUsers: userCount?.count ?? 0,
+      lastUpdated: new Date(),
+    };
+    logger.info(cachedStats, "Admin stats cache refreshed");
+  } catch (err) {
+    logger.warn({ err }, "Failed to refresh admin stats cache");
+  }
+}
+
+function startStatsCache(): void {
+  refreshStatsCache().catch(() => {});
+  setInterval(() => refreshStatsCache().catch(() => {}), 10 * 60 * 1000);
 }
 
 // ─── NEW: Per-user rate limiter ───────────────────────────────────────────────
@@ -225,13 +294,22 @@ async function handleImageGeneration(msg: TelegramBot.Message, text: string): Pr
 
   try {
     const imageUrl = await generateImage(prompt, telegramId);
-    if (!imageUrl) throw new Error("No URL returned");
+    if (!imageUrl) throw new Error("No URL returned from Pollinations");
 
-    const resp = await fetch(imageUrl);
-    if (!resp.ok) throw new Error(`Download HTTP ${resp.status}`);
-    const buf = Buffer.from(await resp.arrayBuffer());
-    const tmp = path.join(os.tmpdir(), `wf-img-${Date.now()}.png`);
+    console.log(`[ImageGen] Fetching from Pollinations: ${imageUrl.slice(0, 120)}`);
+
+    // ── Lightning-fast axios buffer pipe ─────────────────────────────────────
+    const response = await axios.get<ArrayBuffer>(imageUrl, {
+      responseType: "arraybuffer",
+      timeout: 60_000,
+      headers: { "User-Agent": "WebForge/1.0" },
+    });
+
+    const buf = Buffer.from(response.data);
+    const tmp = path.join(os.tmpdir(), `wf-img-${Date.now()}.jpg`);
     await fs.writeFile(tmp, buf);
+
+    console.log(`[ImageGen] ✅ Downloaded ${buf.length} bytes → ${path.basename(tmp)}`);
 
     if (ackMsg) await safeDelete(bot, chatId, ackMsg.message_id);
     await bot.sendPhoto(chatId, tmp, {
@@ -243,11 +321,21 @@ async function handleImageGeneration(msg: TelegramBot.Message, text: string): Pr
 
     addToHistory(telegramId, "user", `[Drew image: ${prompt.slice(0, 100)}]`);
 
+    recordTelemetry({
+      sessionId: String(telegramId),
+      action: "image_gen",
+      model: "Pollinations-Primary",
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0.0,
+    }).catch(() => {});
+
   } catch (err) {
     logger.error({ err }, "Image generation error");
+    console.log(`[ImageGen] ❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
     if (ackMsg) {
       await safeEdit(bot, chatId, ackMsg.message_id,
-        `❌ Image generation hit a snag — the AI model may be warming up. Try again in a moment!\n\nPrompt saved: "${prompt.slice(0,80)}"`,
+        `❌ Image generation hit a snag — Pollinations may be warming up. Try again in a moment!\n\nPrompt saved: "${prompt.slice(0,80)}"`,
         { parse_mode: "Markdown" }
       );
     }
@@ -388,8 +476,19 @@ async function runFullBuild(
 
     // ── Write files ───────────────────────────────────────────────────────
     broadcastProgress(pid, 62, "Writing files to disk...", 0, plan.manifest.length);
+
+    // Integrity retry function — escalates to deepseek-r1 / grok-3
+    const integrityRetryFn = async (filename: string, description: string, attempt: number): Promise<string> => {
+      const retryModel = attempt === 1 ? "deepseek-r1" : "grok-3";
+      console.log(`[Integrity Gate] 🔁 Escalating to ${retryModel} for ${filename} (attempt ${attempt})`);
+      const strictPrompt = `You failed to write complete code for "${filename}". Rewrite the full operational source code now. Do not return placeholders, comments-only files, or empty content.\n\nFile purpose: ${description}\nApp context: ${description}\n\nReturn ONLY the complete file content — no markdown formatting, no explanation.`;
+      const r = await routeTask("coding", strictPrompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
+      return r.content;
+    };
+
     const written = await buildProjectFiles(workDir, finalCode, pid, plan.manifest,
       (n, f) => broadcastProgress(pid, 62 + (n / Math.max(plan.manifest.length, 1)) * 12, `Writing ${path.basename(f)}`, n, plan.manifest.length),
+      integrityRetryFn,
     );
 
     // ── Syntax audit loop ─────────────────────────────────────────────────
@@ -1044,16 +1143,34 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
 
   addToHistory(telegramId, "user", text);
 
-  // ① Image intent
-  if (isImageIntent(text)) { await handleImageGeneration(msg, text); return; }
+  // ── High-intent build words: ALWAYS route to build pipeline first ──────────
+  // If explicit development keywords are present, skip billing check entirely.
+  // Billing intent check only applies to pure pricing/upgrade queries.
+  const buildFirst = /\b(build\s+a|create\s+an?\s+application|full[\s-]stack|project\b)/i.test(text);
 
-  // ② Billing
-  if (isBillingIntent(text)) { await handleUpgrade(msg); return; }
+  // ① Image intent (always highest priority)
+  if (isImageIntent(text)) {
+    console.log(`[CoreBot] Incoming Message from User: ${telegramId} Routed to State: IMAGE_GENERATION`);
+    await handleImageGeneration(msg, text);
+    return;
+  }
 
-  // ③ Build intent
-  if (isBuildIntent(text)) { await handleBuildRequest(msg, text); return; }
+  // ② Build intent — must beat billing when high-intent build words present
+  if (isBuildIntent(text) || buildFirst) {
+    console.log(`[CoreBot] Incoming Message from User: ${telegramId} Routed to State: BUILD_PIPELINE (buildFirst=${buildFirst})`);
+    await handleBuildRequest(msg, text);
+    return;
+  }
+
+  // ③ Billing intent — only fires if NOT a build message
+  if (isBillingIntent(text)) {
+    console.log(`[CoreBot] Incoming Message from User: ${telegramId} Routed to State: BILLING_MENU`);
+    await handleUpgrade(msg);
+    return;
+  }
 
   // ④ General chat with conversation memory
+  console.log(`[CoreBot] Incoming Message from User: ${telegramId} Routed to State: GENERAL_CHAT`);
   const check = await checkActionAllowed(telegramId);
   if (!check.allowed) { await safeSend(bot, chatId, `⚠️ ${escapeMd(check.reason ?? "Limit reached")}\n\nUpgrade via ${PAYMENT_BOT_USERNAME}`); return; }
 
@@ -1065,7 +1182,9 @@ async function handleGeneralMessage(msg: TelegramBot.Message): Promise<void> {
     ? `[Conversation so far:\n${history.slice(-6).map(h => `${h.role}: ${h.content}`).join("\n")}\n]\n\nLatest: ${text}`
     : text;
 
-  const result = await routeTask(detectTaskType(text), contextPrompt, check.user!.tier, telegramId, WEBFORGE_SYSTEM_PROMPT);
+  // Subscription defaulting — never let a null tier crash or short-circuit to billing
+  const resolvedTier: Tier = (check.user?.tier as Tier) ?? "starter";
+  const result = await routeTask(detectTaskType(text), contextPrompt, resolvedTier, telegramId, WEBFORGE_SYSTEM_PROMPT);
   await incrementAction(telegramId);
 
   addToHistory(telegramId, "assistant", result.content.slice(0, 500));
@@ -1119,6 +1238,7 @@ export function initCoreBot(): void {
   logger.info("Core bot started polling");
 
   startDailyResetTimer();
+  startStatsCache();
 
   bot.onText(/\/start/, safeHandler(handleStart));
   bot.onText(/\/help/, safeHandler(handleHelp));
@@ -1126,6 +1246,24 @@ export function initCoreBot(): void {
   bot.onText(/\/status/, safeHandler(handleStatus));
   bot.onText(/\/upgrade/, safeHandler(handleUpgrade));
   bot.onText(/\/cancel/, safeHandler(handleCancel));
+
+  // ── Admin-only: /stats ─────────────────────────────────────────────────────
+  bot.onText(/\/stats/, safeHandler(async (msg) => {
+    if (msg.from!.id !== ADMIN_TELEGRAM_ID) return; // silently ignore non-admins
+    const s = cachedStats;
+    const age = Math.round((Date.now() - s.lastUpdated.getTime()) / 1000);
+    const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
+    await safeSend(bot!, msg.chat.id,
+      `📊 *WebForge Engine Diagnostics*\n\n` +
+      `🔨 *Total Completed Builds:* ${s.totalBuilds.toLocaleString()}\n` +
+      `🟢 *Active Live Ports:* ${s.activeLivePorts.toLocaleString()}\n` +
+      `🧠 *Global Token Consumption:* ${s.totalTokens.toLocaleString()}\n` +
+      `💰 *Estimated Revenue Generated:* ₦${s.estimatedRevenueNgn.toLocaleString()}\n` +
+      `👥 *Engaged Platform Users:* ${s.uniqueUsers.toLocaleString()}\n\n` +
+      `_Cache refreshed: ${ageStr} • Updates every 10 min_`,
+      { parse_mode: "Markdown" }
+    );
+  }));
 
   bot.onText(/\/draw(?:\s+(.+))?/, safeHandler(async (msg, match) => {
     if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }

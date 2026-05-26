@@ -395,12 +395,15 @@ export function parseFilesFromAIOutput(output: string, manifest?: FilePlan[]): P
 
 // ─── Build Project Files ──────────────────────────────────────────────────────
 
+const MIN_FILE_CHARS = 50; // Minimum content length — anything shorter is a generation failure
+
 export async function buildProjectFiles(
   workDir: string,
   aiOutput: string,
   projectId: string,
   manifest: FilePlan[],
   onFileWritten: (filesWritten: number, filePath: string) => void,
+  retryGenerationFn?: (filename: string, description: string, attempt: number) => Promise<string>,
 ): Promise<number> {
   const parsed = parseFilesFromAIOutput(aiOutput, manifest);
   logger.info({ projectId, parsedCount: parsed.length, outputLen: aiOutput.length }, "buildProjectFiles parsed");
@@ -411,19 +414,69 @@ export async function buildProjectFiles(
     toWrite = generateGuaranteedApp(manifest);
   } else {
     const parsedPaths = new Set(parsed.map(f => f.path));
-    const stubs = manifest.filter(m => !parsedPaths.has(m.path)).map(m => ({ path: m.path, content: generateStubFile(m) }));
+    const stubs = manifest
+      .filter(m => !parsedPaths.has(m.path))
+      .map(m => ({ path: m.path, content: generateStubFile(m) }));
     toWrite = [...parsed, ...stubs];
   }
 
   let written = 0;
+
   for (const file of toWrite) {
     const absPath = path.join(workDir, file.path);
+    let content = file.content;
+
+    // ── Generation Integrity Gate ────────────────────────────────────────────
+    // Skip README, gitignore, .env — they can legitimately be short
+    const isShortAllowed = /\.(md|env|gitignore|txt|json)$/i.test(file.path);
+    const isTooShort = content.trim().length < MIN_FILE_CHARS;
+
+    if (isTooShort && !isShortAllowed) {
+      const failureMsg = `Generation Integrity Failure: Code payload for "${file.path}" is missing or too small (${content.trim().length} chars).`;
+      logger.warn({ projectId, file: file.path, size: content.trim().length }, failureMsg);
+      console.log(`[Integrity Gate] ❌ ${failureMsg}`);
+
+      // ── Retry loop — escalate to heavy reasoning model ────────────────────
+      if (retryGenerationFn) {
+        let retryContent = "";
+        const maxRetries = 3;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          console.log(`[Integrity Gate] 🔄 Retry ${attempt}/${maxRetries} for ${file.path}`);
+          try {
+            retryContent = await retryGenerationFn(file.path, manifest.find(m => m.path === file.path)?.description ?? file.path, attempt);
+            if (retryContent.trim().length >= MIN_FILE_CHARS) {
+              console.log(`[Integrity Gate] ✅ Retry ${attempt} succeeded for ${file.path} (${retryContent.trim().length} chars)`);
+              content = retryContent;
+              break;
+            }
+            logger.warn({ projectId, file: file.path, attempt }, "Integrity retry still too short");
+          } catch (retryErr) {
+            logger.warn({ retryErr, file: file.path, attempt }, "Integrity retry failed");
+          }
+        }
+        // If all retries failed, generate a stub so the build continues
+        if (content.trim().length < MIN_FILE_CHARS) {
+          console.log(`[Integrity Gate] ⚠️ All retries failed for ${file.path} — using intelligent stub`);
+          content = generateStubFile(manifest.find(m => m.path === file.path) ?? { path: file.path, description: file.path });
+        }
+      } else {
+        // No retry function — use stub
+        content = generateStubFile(manifest.find(m => m.path === file.path) ?? { path: file.path, description: file.path });
+      }
+    }
+
     await fs.mkdir(path.dirname(absPath), { recursive: true });
-    await fs.writeFile(absPath, file.content, "utf8");
+    await fs.writeFile(absPath, content, "utf8");
     written++;
     onFileWritten(written, file.path);
-    logger.info({ projectId, file: file.path, size: file.content.length }, "File written");
+    logger.info({ projectId, file: file.path, size: content.length }, "File written");
+    console.log(`[BuildFiles] ✍️  ${file.path} — ${content.length} chars`);
   }
+
+  const totalCost = toWrite.reduce((sum, f) => sum + f.content.length, 0);
+  const estimatedCost = (totalCost / 1000) * 0.002; // rough estimate: ~$0.002 per 1k chars
+  console.log(`[BuildFiles] 📦 Build complete — ${written} files, ~${totalCost} chars, estimated cost ~$${estimatedCost.toFixed(4)}`);
+
   return written;
 }
 

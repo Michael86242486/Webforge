@@ -264,66 +264,20 @@ function detectCodeIssues(code: string): string[] {
   return issues;
 }
 
-// ─── Pollinations Fallback ────────────────────────────────────────────────────
-
-async function generateImageViaGateway(prompt: string, telegramId?: number): Promise<string> {
-  const { client } = await getClientForUser(telegramId);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 25_000);
-  try {
-    const response = await client.images.generate({
-      model: "image-gen",
-      prompt,
-      n: 1,
-      size: "1024x1024",
-    });
-    clearTimeout(timer);
-    const url = response.data?.[0]?.url ?? "";
-    if (!url) throw new Error("Empty URL from primary gateway");
-    return url;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function generateImageViaPollinationsAI(prompt: string): Promise<string> {
-  // Pollinations returns the image binary directly at this URL — our bot downloads it as a buffer
-  const seed = Math.floor(Math.random() * 99999);
-  const url = `https://image.pollinations.ai/p/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}&model=flux`;
-  logger.info({ prompt: prompt.slice(0, 60) }, "Using Pollinations AI fallback");
-
-  // Probe that the URL resolves (HEAD request with timeout)
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 20_000);
-  try {
-    const probe = await fetch(url, { method: "HEAD", signal: ctrl.signal });
-    clearTimeout(timer);
-    if (!probe.ok) throw new Error(`Pollinations probe HTTP ${probe.status}`);
-    return url;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// ─── Pollinations AI — Official Primary Image Engine ─────────────────────────
+//
+// The old Render /v1/images/generations proxy has been removed.
+// Pollinations AI is now the sole, direct image generation engine.
+// Cost: $0.0000 (fully open-source and free).
 
 export async function generateImage(
   prompt: string,
-  telegramId?: number,
+  _telegramId?: number,
 ): Promise<string> {
-  // Try primary gateway first
-  try {
-    const url = await generateImageViaGateway(prompt, telegramId);
-    logger.info({ prompt: prompt.slice(0, 60) }, "Image generated via primary gateway");
-    return url;
-  } catch (primaryErr) {
-    logger.warn({ err: primaryErr }, "Primary image gateway failed — falling back to Pollinations AI");
-  }
-
-  // Bulletproof fallback: Pollinations AI
-  try {
-    return await generateImageViaPollinationsAI(prompt);
-  } catch (fallbackErr) {
-    logger.error({ err: fallbackErr }, "Pollinations AI fallback also failed");
-    // Last-resort: return a direct Pollinations URL without probing — let the bot attempt the download
-    return `https://image.pollinations.ai/p/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true`;
-  }
+  const seed = Math.floor(Math.random() * 999999);
+  // Clean the prompt: strip leading/trailing whitespace, collapse internal whitespace
+  const cleanPrompt = prompt.trim().replace(/\s+/g, " ");
+  const url = `https://image.pollinations.ai/p/${encodeURIComponent(cleanPrompt)}?width=1024&height=1024&nologo=true&enhance=true&seed=${seed}`;
+  logger.info({ prompt: cleanPrompt.slice(0, 80), engine: "Pollinations-Primary" }, "Image generation request");
+  return url;
 }
