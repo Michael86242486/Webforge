@@ -777,6 +777,31 @@ export async function triBrainBuildFiles(
   const stripFences = (s: string) =>
     s.replace(/^```[\w\s]*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
 
+  // ── Swarm File Classifier ─────────────────────────────────────────────────
+  // Routes each file to its designated model in the swarm:
+  //   frontend (HTML/CSS/public JS)  → Mistral  (retro-neon UI, layout, interactivity)
+  //   backend  (server JS, routes)   → Grok-3   (Express architecture, data flows, APIs)
+  //   simple   (md/env/txt)          → grok-3-mini (lightweight, no heavy context needed)
+  const classifyFile = (p: string): { model: string; lane: string } => {
+    if (isSimpleFile(p)) return { model: "grok-3-mini", lane: "simple" };
+    const isFrontend =
+      /^public[/\\]/.test(p) ||
+      /^client[/\\]/.test(p) ||
+      /^static[/\\]/.test(p) ||
+      /^ui[/\\]/.test(p) ||
+      p.endsWith(".html") ||
+      p.endsWith(".css") ||
+      (p.endsWith(".js") && /[/\\](public|client|static|ui)[/\\]/.test(p));
+    if (isFrontend) return { model: "mistral", lane: "Mistral(UI)" };
+    return { model: "grok-3", lane: "Grok-3(backend)" };
+  };
+
+  const mistralSystemPrompt =
+    "You are an elite frontend UI engineer specialising in retro-neon web design. " +
+    "Write COMPLETE, visually stunning HTML/CSS/JavaScript — no truncation, no TODOs, no stubs. " +
+    "Use neon accents, glassmorphism cards, smooth animations, and responsive grids. " +
+    "All .js files use CommonJS (require/module.exports). Make it beautiful and production-ready.";
+
   const buildPrompt = (file: FilePlan, pkgCtx?: string): string =>
     `Write the COMPLETE source code for ONE specific file in a web application.\n\n` +
     `PROJECT: "${projectDescription}"\n` +
@@ -791,7 +816,7 @@ export async function triBrainBuildFiles(
     `MANDATORY RULES:\n` +
     `- Return ONLY raw file content — zero markdown fences, zero explanation\n` +
     `- CommonJS ONLY for .js files (require/module.exports) — never use import/export\n` +
-    `- Server .js files MUST include: const PORT = process.env.PORT || 3000;\n` +
+    `- Server .js files MUST include: const PORT = process.env.PORT || 3000; and app.listen(PORT, '0.0.0.0')\n` +
     `- HTML: complete DOCTYPE, beautiful themed UI matching the color scheme above, linked CSS + JS\n` +
     `- CSS: minimum 80 lines — gradients, animations, hover states, flex/grid responsive layout\n` +
     `- package.json: "scripts":{"start":"node src/index.js"} and ALL required npm package names\n` +
@@ -800,24 +825,29 @@ export async function triBrainBuildFiles(
     `- Complex files (JS/HTML/CSS): minimum 60 lines of real, working code`;
 
   // ── Per-file generator with integrity gate + Dev-X audit ──────────────────
+  // Model selection is determined by classifyFile() before this is called,
+  // so backend files go to Grok-3 and frontend files go to Mistral in parallel.
   const generateFile = async (
     file: FilePlan,
     pkgCtx?: string,
+    modelOverride?: string,
   ): Promise<{ content: string; costUsd: number; phase: string }> => {
     const simple = isSimpleFile(file.path);
     const complex = isComplexFile(file.path);
-    const model = simple ? "grok-3-mini" : "grok-3";
+    const { model: classifiedModel, lane } = classifyFile(file.path);
+    const model = modelOverride ?? classifiedModel;
+    const sysPrompt = model === "mistral" ? mistralSystemPrompt : grokSystemPrompt;
     const maxToks = simple ? 2048 : complex ? 16384 : 8192;
-    let phase = simple ? "Grok-mini" : "Grok-3";
+    let phase = simple ? "Grok-mini" : lane;
     let content = "";
     let costUsd = 0;
 
-    // Phase 2: Primary generation
+    // Phase 2: Primary generation — model is Grok-3 (backend) or Mistral (frontend)
     try {
-      const result = await routeTaskForModel(model, buildPrompt(file, pkgCtx), grokSystemPrompt, telegramId, maxToks);
+      const result = await routeTaskForModel(model, buildPrompt(file, pkgCtx), sysPrompt, telegramId, maxToks);
       content = stripFences(result.content);
       costUsd += result.costUsd;
-      console.log(`[TriBrain] ✓ ${model} → ${file.path} (${content.length} chars)`);
+      console.log(`[TriBrain] ✓ ${model}[${lane}] → ${file.path} (${content.length} chars)`);
     } catch (err) {
       phaseErrors.push(`${model} failed for ${file.path}: ${String(err).slice(0, 100)}`);
       logger.warn({ file: file.path, err }, "triBrainBuildFiles: primary generation failed");
