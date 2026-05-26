@@ -565,3 +565,185 @@ export async function cloneRepository(repoUrl: string, targetDir: string): Promi
   await fs.mkdir(path.dirname(targetDir), { recursive: true });
   await runTerminalCommand(`git clone --depth=1 "${repoUrl}" "${targetDir}"`, "/tmp");
 }
+
+// ─── Self-Healing Runtime Autopsy ─────────────────────────────────────────────
+// Reads crash logs, routes to AI for targeted patch, re-spawns, retries up to N times.
+
+export interface HealResult {
+  healed: boolean;
+  attempts: number;
+  errorLog: string;
+}
+
+export async function selfHealApp(
+  workDir: string,
+  projectId: number,
+  port: number,
+  existingPid: number | undefined,
+  routeTaskFn: (prompt: string) => Promise<string>,
+  onAttempt: (attempt: number, maxAttempts: number, fixed: boolean) => void,
+  maxAttempts = 3,
+): Promise<HealResult> {
+  let lastErrorLog = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // ── Read crash evidence ─────────────────────────────────────────────────
+    let stderrContent = "";
+    try {
+      stderrContent = await fs.readFile(path.join(workDir, "app.stderr.log"), "utf8");
+      // Only last 2000 chars of stderr — focus on the crash not old lines
+      stderrContent = stderrContent.trim().split("\n").slice(-40).join("\n");
+    } catch { stderrContent = ""; }
+
+    let stdoutContent = "";
+    try {
+      stdoutContent = await fs.readFile(path.join(workDir, "app.stdout.log"), "utf8");
+      stdoutContent = stdoutContent.trim().split("\n").slice(-15).join("\n");
+    } catch { stdoutContent = ""; }
+
+    const errorLog = `STDERR:\n${stderrContent}\n\nSTDOUT:\n${stdoutContent}`.slice(0, 2500);
+    lastErrorLog = errorLog;
+
+    if (!stderrContent && !stdoutContent) {
+      // No log yet — process may not have had time to crash, skip this attempt
+      await new Promise(r => setTimeout(r, 3000));
+      continue;
+    }
+
+    logger.info({ projectId, attempt, errorSnippet: stderrContent.slice(0, 200) }, "selfHeal: analysing crash");
+
+    // ── Find which file caused the crash ────────────────────────────────────
+    const fileMatch = stderrContent.match(/(?:at\s+|require\s*\(|Error in\s+|Error:\s+)[^\n]*?\b([\w./src-]+\.m?js)(?::\d+)/);
+    const crashedFile = fileMatch?.[1];
+
+    // ── Read the crashing file ───────────────────────────────────────────────
+    let originalCode = "";
+    if (crashedFile) {
+      try { originalCode = await fs.readFile(path.join(workDir, crashedFile), "utf8"); } catch { }
+    }
+
+    // If we can't identify the file, read all JS files under 200 lines
+    if (!originalCode) {
+      try {
+        const allFiles = await listProjectFiles(workDir);
+        const jsFiles = allFiles.filter(f => f.endsWith(".js") && !f.includes("node_modules")).slice(0, 5);
+        for (const f of jsFiles) {
+          const c = await fs.readFile(f, "utf8").catch(() => "");
+          if (c) originalCode += `\n\n// FILE: ${path.relative(workDir, f)}\n${c}`;
+        }
+      } catch { }
+    }
+
+    // ── AI patch request ─────────────────────────────────────────────────────
+    const patchPrompt = `An app crashed on startup. Fix the issue and return the corrected file(s).
+
+CRASH LOG:
+${errorLog}
+
+${crashedFile ? `CRASHING FILE (${crashedFile}):\n${originalCode.slice(0, 3000)}` : `PROJECT FILES:\n${originalCode.slice(0, 3000)}`}
+
+Return ONLY the fixed code using this format for each file changed:
+=== FILE: path/to/file.js ===
+// complete corrected file content
+=== END FILE ===
+
+Rules: CommonJS only, use process.env.PORT, fix the exact crash — do not change unrelated code.`;
+
+    let patchedCode = "";
+    try {
+      patchedCode = await routeTaskFn(patchPrompt);
+    } catch (aiErr) {
+      logger.warn({ aiErr, attempt }, "selfHeal: AI patch request failed");
+      onAttempt(attempt, maxAttempts, false);
+      continue;
+    }
+
+    // ── Apply patches ────────────────────────────────────────────────────────
+    const fmt1 = /===\s*FILE:\s*(.+?)\s*===\n([\s\S]*?)(?====\s*(?:FILE:|END\s*FILE)|$)/gi;
+    let m: RegExpExecArray | null;
+    let patchApplied = false;
+    while ((m = fmt1.exec(patchedCode)) !== null) {
+      const relPath = m[1].trim().replace(/^\/+/, "");
+      const content = m[2].replace(/===\s*END\s*FILE\s*===/i, "").trim();
+      if (relPath && content.length > 20) {
+        const absPath = path.join(workDir, relPath);
+        await fs.mkdir(path.dirname(absPath), { recursive: true });
+        await fs.writeFile(absPath, content, "utf8");
+        logger.info({ projectId, attempt, file: relPath }, "selfHeal: patch written");
+        patchApplied = true;
+      }
+    }
+
+    if (!patchApplied) {
+      logger.warn({ attempt }, "selfHeal: no parseable patches from AI");
+      onAttempt(attempt, maxAttempts, false);
+      continue;
+    }
+
+    // ── Kill old process ─────────────────────────────────────────────────────
+    if (existingPid) {
+      try { process.kill(existingPid, "SIGTERM"); } catch { }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    // Clear log files so next round reads fresh crashes
+    await fs.writeFile(path.join(workDir, "app.stderr.log"), "", "utf8").catch(() => {});
+    await fs.writeFile(path.join(workDir, "app.stdout.log"), "", "utf8").catch(() => {});
+
+    // ── Re-spawn ─────────────────────────────────────────────────────────────
+    const { pid: newPid } = await spawnProjectApp(workDir, projectId, port);
+    existingPid = newPid;
+    logger.info({ projectId, attempt, newPid }, "selfHeal: re-spawned");
+
+    // ── Health check ─────────────────────────────────────────────────────────
+    const alive = await pollAppHealth(port, 30_000, 2_000);
+    onAttempt(attempt, maxAttempts, alive);
+
+    if (alive) {
+      logger.info({ projectId, attempt }, "selfHeal: app is live after patch");
+      return { healed: true, attempts: attempt, errorLog: lastErrorLog };
+    }
+
+    logger.warn({ projectId, attempt }, "selfHeal: still not responding, next round");
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  return { healed: false, attempts: maxAttempts, errorLog: lastErrorLog };
+}
+
+// ─── Semantic Code Splicer ────────────────────────────────────────────────────
+// Injects content BEFORE or AFTER a structural anchor, without overwriting the whole file.
+
+export async function spliceCodeIntoFile(
+  filePath: string,
+  targetAnchor: string,
+  injectionContent: string,
+  position: "before" | "after" = "after",
+): Promise<boolean> {
+  try {
+    const existing = await fs.readFile(filePath, "utf8");
+    const idx = existing.indexOf(targetAnchor);
+    if (idx === -1) {
+      logger.warn({ filePath, targetAnchor }, "spliceCodeIntoFile: anchor not found");
+      return false;
+    }
+
+    let spliced: string;
+    if (position === "before") {
+      spliced = existing.slice(0, idx) + injectionContent + "\n" + existing.slice(idx);
+    } else {
+      // After: insert after the anchor line (find end of anchor's line)
+      const afterAnchor = idx + targetAnchor.length;
+      const nextNewline = existing.indexOf("\n", afterAnchor);
+      const insertAt = nextNewline === -1 ? existing.length : nextNewline + 1;
+      spliced = existing.slice(0, insertAt) + injectionContent + "\n" + existing.slice(insertAt);
+    }
+
+    await fs.writeFile(filePath, spliced, "utf8");
+    logger.info({ filePath, targetAnchor, position }, "spliceCodeIntoFile: success");
+    return true;
+  } catch (err) {
+    logger.error({ err, filePath }, "spliceCodeIntoFile: failed");
+    return false;
+  }
+}

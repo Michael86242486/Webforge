@@ -77,6 +77,19 @@ const COST_MAP: Record<string, { input: number; output: number }> = {
   "llama-3.3-70b-instruct":{ input: 0.20,  output: 0.40  },
 };
 
+function modelsForTier(taskType: TaskType, tier: string): string[] {
+  const all = TASK_MODEL_MAP[taskType] ?? ["gpt-5-nano"];
+  if (tier === "starter") {
+    const starters = all.filter(m => STARTER_MODELS.has(m));
+    return starters.length ? starters : ["gpt-5-nano"];
+  }
+  if (tier === "pro") {
+    const pros = all.filter(m => m !== "deepseek-r1" && m !== "kimi-k2-thinking");
+    return pros.length ? pros : all;
+  }
+  return all; // elite gets full list in order
+}
+
 export async function routeTask(
   taskType: TaskType,
   prompt: string,
@@ -84,32 +97,46 @@ export async function routeTask(
   telegramId?: number,
   systemPrompt?: string,
 ): Promise<RouterResult> {
-  const model = pickModel(taskType, tier);
   const { client } = await getClientForUser(telegramId);
-
-  logger.info({ taskType, model, tier }, "Routing AI task");
-
-  // ALWAYS inject a system prompt — never allow the model to run context-free
   const sysContent = systemPrompt ?? WEBFORGE_DEFAULT_SYSTEM;
-
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: sysContent },
     { role: "user", content: prompt },
   ];
+  const temperature = taskType === "planning" ? 0.3 : taskType === "coding" ? 0.15 : 0.6;
 
-  const completion = await client.chat.completions.create({
-    model,
-    messages,
-    temperature: taskType === "planning" ? 0.3 : taskType === "coding" ? 0.15 : 0.6,
-  });
+  // ── Failover across all models for the tier ─────────────────────────────
+  const candidates = modelsForTier(taskType, tier);
+  let lastErr: unknown;
 
-  const content = completion.choices[0]?.message?.content ?? "";
-  const inputTokens = completion.usage?.prompt_tokens ?? 0;
-  const outputTokens = completion.usage?.completion_tokens ?? 0;
-  const costs = COST_MAP[model] ?? { input: 0.50, output: 1.00 };
-  const costUsd = (inputTokens / 1_000_000) * costs.input + (outputTokens / 1_000_000) * costs.output;
+  for (const model of candidates) {
+    try {
+      logger.info({ taskType, model, tier }, "Routing AI task");
+      const completion = await client.chat.completions.create({ model, messages, temperature });
+      const content = completion.choices[0]?.message?.content ?? "";
+      const inputTokens = completion.usage?.prompt_tokens ?? 0;
+      const outputTokens = completion.usage?.completion_tokens ?? 0;
+      const costs = COST_MAP[model] ?? { input: 0.50, output: 1.00 };
+      const costUsd = (inputTokens / 1_000_000) * costs.input + (outputTokens / 1_000_000) * costs.output;
+      return { content, model, inputTokens, outputTokens, costUsd };
+    } catch (err) {
+      logger.warn({ model, err }, "Model failed — trying next candidate");
+      lastErr = err;
+    }
+  }
 
-  return { content, model, inputTokens, outputTokens, costUsd };
+  // Final fallback: gpt-5-nano on a clean client (never throws)
+  try {
+    logger.warn({ candidates }, "All candidates failed — using gpt-5-nano emergency fallback");
+    const fallbackClient = new OpenAI({ apiKey: GATEWAY_KEY, baseURL: GATEWAY_URL });
+    const completion = await fallbackClient.chat.completions.create({
+      model: "gpt-5-nano", messages, temperature,
+    });
+    const content = completion.choices[0]?.message?.content ?? "";
+    return { content, model: "gpt-5-nano", inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  } catch {
+    throw lastErr ?? new Error("All AI models failed");
+  }
 }
 
 export interface DeepBuildResult {
@@ -237,16 +264,66 @@ function detectCodeIssues(code: string): string[] {
   return issues;
 }
 
+// ─── Pollinations Fallback ────────────────────────────────────────────────────
+
+async function generateImageViaGateway(prompt: string, telegramId?: number): Promise<string> {
+  const { client } = await getClientForUser(telegramId);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25_000);
+  try {
+    const response = await client.images.generate({
+      model: "image-gen",
+      prompt,
+      n: 1,
+      size: "1024x1024",
+    });
+    clearTimeout(timer);
+    const url = response.data?.[0]?.url ?? "";
+    if (!url) throw new Error("Empty URL from primary gateway");
+    return url;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function generateImageViaPollinationsAI(prompt: string): Promise<string> {
+  // Pollinations returns the image binary directly at this URL — our bot downloads it as a buffer
+  const seed = Math.floor(Math.random() * 99999);
+  const url = `https://image.pollinations.ai/p/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}&model=flux`;
+  logger.info({ prompt: prompt.slice(0, 60) }, "Using Pollinations AI fallback");
+
+  // Probe that the URL resolves (HEAD request with timeout)
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20_000);
+  try {
+    const probe = await fetch(url, { method: "HEAD", signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!probe.ok) throw new Error(`Pollinations probe HTTP ${probe.status}`);
+    return url;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function generateImage(
   prompt: string,
   telegramId?: number,
 ): Promise<string> {
-  const { client } = await getClientForUser(telegramId);
-  const response = await client.images.generate({
-    model: "image-gen",
-    prompt,
-    n: 1,
-    size: "1024x1024",
-  });
-  return response.data?.[0]?.url ?? "";
+  // Try primary gateway first
+  try {
+    const url = await generateImageViaGateway(prompt, telegramId);
+    logger.info({ prompt: prompt.slice(0, 60) }, "Image generated via primary gateway");
+    return url;
+  } catch (primaryErr) {
+    logger.warn({ err: primaryErr }, "Primary image gateway failed — falling back to Pollinations AI");
+  }
+
+  // Bulletproof fallback: Pollinations AI
+  try {
+    return await generateImageViaPollinationsAI(prompt);
+  } catch (fallbackErr) {
+    logger.error({ err: fallbackErr }, "Pollinations AI fallback also failed");
+    // Last-resort: return a direct Pollinations URL without probing — let the bot attempt the download
+    return `https://image.pollinations.ai/p/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true`;
+  }
 }

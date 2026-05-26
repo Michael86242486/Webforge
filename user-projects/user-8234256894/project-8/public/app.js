@@ -1,0 +1,1 @@
+fetch('/api/health').then(r=>r.json()).then(d=>{document.getElementById('status').textContent='✅ API '+d.status+' — '+d.ts;}).catch(()=>{document.getElementById('status').textContent='⚠️ API unavailable';document.getElementById('status').style.color='#f0883e';});

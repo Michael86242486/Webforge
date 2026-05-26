@@ -12,7 +12,7 @@ import {
   planningMode, buildProjectFiles, runTerminalCommand,
   spawnProjectApp, pollAppHealth, assignProjectPort, findFreePort,
   syntaxAuditFiles, patchSyntaxError, generateReadme,
-  gitCloneRepo, gitPushChanges, gitInitRepo,
+  gitCloneRepo, gitPushChanges, selfHealApp,
   type PlanningResult,
 } from "../engines/orchestrator.js";
 import {
@@ -397,8 +397,38 @@ async function runFullBuild(
 
     // ── Health poll ───────────────────────────────────────────────────────
     broadcastProgress(pid, 92, "Polling for HTTP response...", written, plan.manifest.length);
-    const isLive = await pollAppHealth(port, 120_000);
+    let isLive = await pollAppHealth(port, 90_000);
     const liveUrl = `${PLATFORM_URL}/api/preview-proxy/${project.id}/`;
+
+    // ── Self-Healing Autopsy (if app didn't start) ────────────────────────
+    if (!isLive) {
+      await bot.sendMessage(chatId,
+        `🔧 *App didn't respond — running self-healing autopsy...*\n_Reading crash logs and dispatching AI repair..._`,
+        { parse_mode: "Markdown" }
+      );
+      broadcastStatus(pid, "Self-healing: analysing crash...");
+
+      const healResult = await selfHealApp(
+        workDir, project.id, port, procPid,
+        prompt => routeTask("fixing", prompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT).then(r => r.content),
+        (attempt, maxAttempts, fixed) => {
+          broadcastStatus(pid, `Heal attempt ${attempt}/${maxAttempts}${fixed ? " ✓" : "..."}`);
+          bot?.sendMessage(chatId,
+            `🔄 *Heal ${attempt}/${maxAttempts}* — ${fixed ? "✅ Fixed! App is live!" : "Still patching..."}`,
+            { parse_mode: "Markdown" }
+          ).catch(() => {});
+        },
+        3,
+      );
+
+      if (healResult.healed) {
+        isLive = true;
+        await bot.sendMessage(chatId,
+          `✨ *Self-healed in ${healResult.attempts} attempt(s)!*\nApp is now live.`,
+          { parse_mode: "Markdown" }
+        );
+      }
+    }
 
     await db.update(projectsTable).set({
       status: isLive ? "running" : "error",
@@ -408,12 +438,10 @@ async function runFullBuild(
     broadcastProgress(pid, 100, isLive ? "App is live!" : "Build complete", written, plan.manifest.length);
     broadcastRedirect(pid, liveUrl);
 
-    // ── Autonomous README ─────────────────────────────────────────────────
-    if (isLive) {
-      generateReadme(workDir, description, plan, liveUrl,
-        prompt => routeTask("chat", prompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT).then(r => r.content)
-      ).catch(() => {});
-    }
+    // ── Autonomous README (async, non-blocking) ───────────────────────────
+    generateReadme(workDir, description, plan, liveUrl,
+      prompt => routeTask("chat", prompt, tier, telegramId, WEBFORGE_SYSTEM_PROMPT).then(r => r.content)
+    ).catch(() => {});
 
     // ── Check for GitHub auto-push ────────────────────────────────────────
     const userRow = await db.select().from(usersTable).where(eq(usersTable.telegramId, telegramId)).limit(1);
@@ -433,13 +461,9 @@ async function runFullBuild(
         }
       );
     } else {
-      try {
-        const errLog = await fs.readFile(path.join(workDir, "app.stderr.log"), "utf8");
-        logger.warn({ projectId: project.id, errLog: errLog.slice(-800) }, "App stderr");
-      } catch {}
       await bot.sendMessage(chatId,
-        `⚠️ *Build Complete — App warming up*\n\n${written} files deployed. Process is running but hasn't responded to HTTP yet.\n\n🌐 *URL (auto-refreshes):*\n${liveUrl}`,
-        { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🌐 Open URL", url: liveUrl }]] } }
+        `⚠️ *Build Complete — App warming up*\n\n${written} files deployed. The process is running but hasn't responded yet.\n\nUse \`/logs ${project.id}\` to inspect crash output, or \`/restart ${project.id}\` to retry.\n\n🌐 ${liveUrl}`,
+        { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🌐 Try URL", url: liveUrl }, { text: "📋 View Logs", callback_data: `logs_${project.id}` }]] } }
       );
     }
 
@@ -567,9 +591,77 @@ async function handleHelp(msg: TelegramBot.Message): Promise<void> {
   if (!bot) return;
   if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
   await bot.sendMessage(msg.chat.id,
-    `🛠 *WebForge Commands*\n\n\`/start\` — Welcome & status\n\`/projects\` — Your projects list\n\`/workspace <id>\` — View a project\n\`/restart <id>\` — Restart a stopped app\n\`/health <id>\` — Live app status & logs\n\`/upgrade\` — Plans & pricing\n\`/status\` — Your account\n\`/link_github [PAT]\` — Connect GitHub account\n\`/clone_repo [url]\` — Clone a GitHub repo\n\n*Image gen* (sends here instantly):\n_"Create an image of..."_\n_"Generate a logo for..."_\n\n*App building* (live URL delivered):\n_"Build me a restaurant website"_`,
+    `🛠 *WebForge Commands*\n\n` +
+    `\`/start\` — Welcome & account status\n` +
+    `\`/projects\` — Your projects list\n` +
+    `\`/workspace <id>\` — Open workspace for a project\n` +
+    `\`/restart <id>\` — Restart a stopped app\n` +
+    `\`/health <id>\` — Live health check & ping\n` +
+    `\`/logs <id>\` — Tail stdout/stderr of a running app\n` +
+    `\`/clone_repo <url>\` — Clone a GitHub repo into a project\n` +
+    `\`/link_github <PAT>\` — Connect your GitHub account\n` +
+    `\`/upgrade\` — Plans & pricing\n` +
+    `\`/status\` — Your tier, usage & API key\n` +
+    `\`/help\` — This message\n\n` +
+    `*Build an app* (just describe it):\n` +
+    `_"Build me a restaurant website"_\n` +
+    `_"Make a task manager with dark mode"_\n\n` +
+    `*Generate images*:\n` +
+    `_"Create an image of a Lagos sunset"_\n` +
+    `_"Generate a logo for my coffee shop"_`,
     { parse_mode: "Markdown" }
   );
+}
+
+async function handleLogs(msg: TelegramBot.Message, projectId: number): Promise<void> {
+  if (!bot) return;
+  if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
+
+  const rows = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId)).limit(1);
+  const project = rows[0];
+  if (!project || project.userId !== msg.from!.id) {
+    await bot.sendMessage(msg.chat.id, `❌ Project #${projectId} not found or doesn't belong to you.`);
+    return;
+  }
+
+  const workDir = path.join(process.cwd(), "user-projects", String(projectId));
+
+  let stdoutLines: string[] = [];
+  let stderrLines: string[] = [];
+
+  try {
+    const raw = await fs.readFile(path.join(workDir, "app.stdout.log"), "utf8");
+    stdoutLines = raw.trim().split("\n").filter(Boolean).slice(-50);
+  } catch { stdoutLines = ["(no stdout log)"] }
+
+  try {
+    const raw = await fs.readFile(path.join(workDir, "app.stderr.log"), "utf8");
+    stderrLines = raw.trim().split("\n").filter(Boolean).slice(-20);
+  } catch { stderrLines = ["(no stderr log)"] }
+
+  const stdoutBlock = stdoutLines.join("\n");
+  const stderrBlock = stderrLines.join("\n");
+
+  let output = `📋 *Project #${projectId} — ${project.name.slice(0, 30)}*\n\n`;
+  output += `*STDOUT (last 50 lines):*\n\`\`\`\n${stdoutBlock}\n\`\`\`\n\n`;
+  output += `*STDERR (last 20 lines):*\n\`\`\`\n${stderrBlock}\n\`\`\``;
+
+  // Telegram hard limit is 4096 — truncate gracefully from the middle
+  if (output.length > 4000) {
+    const combined = `${stdoutBlock}\n\n--- STDERR ---\n${stderrBlock}`;
+    const truncated = combined.slice(-3000);
+    output = `📋 *Project #${projectId} — ${project.name.slice(0, 30)}*\n_(truncated — last 3000 chars)_\n\`\`\`\n${truncated}\n\`\`\``;
+  }
+
+  await bot.sendMessage(msg.chat.id, output, {
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "🔄 Restart App", callback_data: `restart_${projectId}` },
+        { text: "🔁 Refresh Logs", callback_data: `logs_${projectId}` },
+      ]],
+    },
+  });
 }
 
 async function handleProjects(msg: TelegramBot.Message): Promise<void> {
@@ -915,6 +1007,13 @@ export function initCoreBot(): void {
     await handleLinkGithub(msg, token);
   });
 
+  bot.onText(/\/logs(?:\s+(\d+))?/, async (msg, match) => {
+    if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
+    const id = match?.[1] ? parseInt(match[1]) : null;
+    if (!id) { await bot!.sendMessage(msg.chat.id, "Usage: /logs <project_id>"); return; }
+    await handleLogs(msg, id);
+  });
+
   bot.onText(/\/clone_repo(?:\s+(.+))?/, async (msg, match) => {
     if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
     const url = match?.[1]?.trim();
@@ -992,6 +1091,12 @@ export function initCoreBot(): void {
         `🐙 *Push Project #${id} to GitHub?*\n\nThis will commit all project files and push to your linked GitHub remote.\n\nReply *YES* to confirm.`,
         { parse_mode: "Markdown" }
       );
+      return;
+    }
+
+    if (data.startsWith("logs_")) {
+      const id = parseInt(data.replace("logs_", ""));
+      await handleLogs(query.message as TelegramBot.Message, id);
       return;
     }
   });

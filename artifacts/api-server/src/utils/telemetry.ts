@@ -105,3 +105,119 @@ export function summarize(sessionId: string): Record<string, unknown> {
     linesRemoved: s.linesRemoved,
   };
 }
+
+// ─── Dynamic Asset Hydration Engine ──────────────────────────────────────────
+// Injects royalty-free CDN image URLs into HTML/EJS based on project context.
+
+interface AssetMap { [placeholder: string]: string }
+
+const CONTEXT_ASSETS: Array<{ keywords: RegExp; assets: AssetMap }> = [
+  {
+    keywords: /restaurant|food|cafe|menu|eat|cuisine|dine|chef|cook/i,
+    assets: {
+      "HERO_IMAGE":    "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=1600&q=80&auto=format&fit=crop",
+      "FOOD_IMAGE_1":  "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=800&q=80&auto=format&fit=crop",
+      "FOOD_IMAGE_2":  "https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=800&q=80&auto=format&fit=crop",
+      "FOOD_IMAGE_3":  "https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=800&q=80&auto=format&fit=crop",
+      "INTERIOR":      "https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=1200&q=80&auto=format&fit=crop",
+    },
+  },
+  {
+    keywords: /portfolio|designer|developer|creative|freelance|artist/i,
+    assets: {
+      "HERO_IMAGE":    "https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&q=80&auto=format&fit=crop",
+      "WORK_IMAGE_1":  "https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&q=80&auto=format&fit=crop",
+      "WORK_IMAGE_2":  "https://images.unsplash.com/photo-1555066931-4365d14431b9?w=800&q=80&auto=format&fit=crop",
+      "AVATAR":        "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400&q=80&auto=format&fit=crop",
+    },
+  },
+  {
+    keywords: /fashion|clothing|style|wear|outfit|boutique|shop|store|apparel/i,
+    assets: {
+      "HERO_IMAGE":    "https://images.unsplash.com/photo-1445205170230-053b83016050?w=1600&q=80&auto=format&fit=crop",
+      "PRODUCT_1":     "https://images.unsplash.com/photo-1572804013427-4d7ca7268217?w=600&q=80&auto=format&fit=crop",
+      "PRODUCT_2":     "https://images.unsplash.com/photo-1585386959984-a4155224a1ad?w=600&q=80&auto=format&fit=crop",
+      "PRODUCT_3":     "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&q=80&auto=format&fit=crop",
+      "BANNER":        "https://images.unsplash.com/photo-1490481651871-ab68de25d43d?w=1200&q=80&auto=format&fit=crop",
+    },
+  },
+  {
+    keywords: /travel|tour|hotel|vacation|destination|trip|holiday|adventure/i,
+    assets: {
+      "HERO_IMAGE":    "https://images.unsplash.com/photo-1488646953014-85cb44e25828?w=1600&q=80&auto=format&fit=crop",
+      "DESTINATION_1": "https://images.unsplash.com/photo-1539037116277-4db20889f2d4?w=800&q=80&auto=format&fit=crop",
+      "DESTINATION_2": "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800&q=80&auto=format&fit=crop",
+      "DESTINATION_3": "https://images.unsplash.com/photo-1527631746610-bca00a040d60?w=800&q=80&auto=format&fit=crop",
+    },
+  },
+  {
+    keywords: /tech|startup|saas|app|software|platform|digital|ai|crypto|blockchain/i,
+    assets: {
+      "HERO_IMAGE":    "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&q=80&auto=format&fit=crop",
+      "FEATURE_1":     "https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=800&q=80&auto=format&fit=crop",
+      "FEATURE_2":     "https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&q=80&auto=format&fit=crop",
+      "DASHBOARD_BG":  "https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1200&q=80&auto=format&fit=crop",
+    },
+  },
+  {
+    keywords: /fitness|gym|health|wellness|workout|sport|yoga|nutrition/i,
+    assets: {
+      "HERO_IMAGE":    "https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=1600&q=80&auto=format&fit=crop",
+      "WORKOUT_1":     "https://images.unsplash.com/photo-1571019614242-c5c5dee9f50b?w=800&q=80&auto=format&fit=crop",
+      "WORKOUT_2":     "https://images.unsplash.com/photo-1517836357463-d25dfeac3438?w=800&q=80&auto=format&fit=crop",
+      "TRAINER":       "https://images.unsplash.com/photo-1476480862126-209bfaa8edc8?w=600&q=80&auto=format&fit=crop",
+    },
+  },
+  {
+    keywords: /real.?estate|property|house|home|apartment|rent|mortgage|listing/i,
+    assets: {
+      "HERO_IMAGE":    "https://images.unsplash.com/photo-1560518883-ce09059eeffa?w=1600&q=80&auto=format&fit=crop",
+      "PROPERTY_1":    "https://images.unsplash.com/photo-1568605114967-8130f3a36994?w=800&q=80&auto=format&fit=crop",
+      "PROPERTY_2":    "https://images.unsplash.com/photo-1502005229762-cf1b2da7c5d6?w=800&q=80&auto=format&fit=crop",
+      "INTERIOR":      "https://images.unsplash.com/photo-1586023492125-27b2c045efd7?w=800&q=80&auto=format&fit=crop",
+    },
+  },
+];
+
+// Generic fallback assets for any project type
+const GENERIC_ASSETS: AssetMap = {
+  "HERO_IMAGE":  "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1600&q=80&auto=format&fit=crop",
+  "SECTION_BG":  "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=1200&q=80&auto=format&fit=crop",
+  "CARD_IMAGE":  "https://images.unsplash.com/photo-1481487196290-c152efe083f5?w=600&q=80&auto=format&fit=crop",
+  "AVATAR":      "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400&q=80&auto=format&fit=crop",
+  "THUMBNAIL":   "https://images.unsplash.com/photo-1485827404703-89b55fcc595e?w=400&q=80&auto=format&fit=crop",
+};
+
+/**
+ * Returns a map of context-appropriate CDN image URLs for a project.
+ * These should be injected into generated HTML to replace placeholder img srcs.
+ */
+export function hydrateProjectAssets(promptContext: string): AssetMap {
+  for (const { keywords, assets } of CONTEXT_ASSETS) {
+    if (keywords.test(promptContext)) {
+      return { ...GENERIC_ASSETS, ...assets };
+    }
+  }
+  return { ...GENERIC_ASSETS };
+}
+
+/**
+ * Replaces placeholder image src attributes in HTML with hydrated CDN URLs.
+ * Targets common patterns like src="HERO_IMAGE", src="{{HERO_IMAGE}}", background-image: url(HERO_IMAGE)
+ */
+export function injectAssetsIntoHtml(html: string, assets: AssetMap): string {
+  let result = html;
+  for (const [key, url] of Object.entries(assets)) {
+    // Replace exact placeholder strings in src/href/url() positions
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    result = result
+      .replace(new RegExp(`src=["']${escaped}["']`, "g"), `src="${url}"`)
+      .replace(new RegExp(`href=["']${escaped}["']`, "g"), `href="${url}"`)
+      .replace(new RegExp(`url\\(${escaped}\\)`, "g"), `url(${url})`)
+      .replace(new RegExp(`url\\(['"]${escaped}['"]\\)`, "g"), `url('${url}')`)
+      .replace(new RegExp(`["']${escaped}["']`, "g"), `"${url}"`);
+  }
+  // Also replace common empty placeholder patterns with generic hero
+  result = result.replace(/src=["'](https?:\/\/placeholder\.com[^"']*)["']/g, `src="${assets["HERO_IMAGE"] ?? GENERIC_ASSETS["HERO_IMAGE"]}"`);
+  return result;
+}
