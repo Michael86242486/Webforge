@@ -1,0 +1,20 @@
+{
+  "name": "vibeforge",
+  "version": "1.0.0",
+  "description": "Highly functional, secure portfolio and monetization platform for independent music producer VibeForge with retro-neon UI, interactive audio player, and monetization endpoints.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": ["music", "portfolio", "monetization", "audio-player", "express"],
+  "author": "VibeForge",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

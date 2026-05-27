@@ -1,0 +1,11 @@
+[ERROR: Invalid file type for direct content generation]
+Audio files (like .mp3) are binary and cannot be represented as raw text in this context.
+To create a placeholder.mp3 for your project:
+
+1. **Generate a silent 1-second MP3** using FFmpeg:
+   ```bash
+   ffmpeg -f lavfi -i anullsrc=r=44100:cl=stereo -t 1 -c:a libmp3lame -b:a 128k placeholder.mp3
+   
+2. **Place it in** `public/assets/audio/placeholder.mp3` (relative path).
+
+This will satisfy the requirement for a placeholder audio file.

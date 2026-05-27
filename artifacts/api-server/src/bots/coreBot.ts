@@ -79,7 +79,7 @@ async function fireWpeWebhook(args: WpeWebhookArgs): Promise<void> {
     event: "build.complete",
     owner,
     framework,
-    url: `${wpeUrl}/preview/${args.projectSlug}/`,
+    url: args.liveUrl,   // actual proxy URL where the app is hosted
     payload: {
       health: args.health,
       buildTime: 3000,
@@ -89,8 +89,7 @@ async function fireWpeWebhook(args: WpeWebhookArgs): Promise<void> {
   // Strip any trailing slash so we never produce double-slashes in the final URL
   const base = wpeUrl.replace(/\/+$/, "");
   const webhookUrl = `${base}/api/webhook/project-ready`;
-  // Override preview URL with clean base too
-  payload.url = `${base}/preview/${args.projectSlug}/`;
+  // payload.url already set to the real live proxy URL — no override needed
 
   try {
     const res = await fetch(webhookUrl, {
