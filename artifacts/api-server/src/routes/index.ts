@@ -4,9 +4,13 @@ import deployingRouter from "./workspace.js";
 import projectsRouter from "./projects.js";
 import streamRouter from "./stream.js";
 import proxyRouter from "./proxy.js";
+import runtimeRouter from "./runtime.js";
+import authRouter from "./auth.js";
 
 const router: IRouter = Router();
 
+router.use(authRouter);
+router.use(runtimeRouter);
 router.use(healthRouter);
 router.use(deployingRouter);
 router.use(projectsRouter);

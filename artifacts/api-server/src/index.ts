@@ -1,7 +1,9 @@
+import http from "http";
 import app from "./app.js";
 import { logger } from "./lib/logger.js";
 import { initCoreBot } from "./bots/coreBot.js";
 import { initPaymentBot } from "./bots/paymentBot.js";
+import { initWebSocketServer } from "./lib/websocket-manager.js";
 import fs from "fs";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -19,8 +21,6 @@ process.on("uncaughtException", (err) => {
 });
 
 // ─── DB Auto-Migration ────────────────────────────────────────────────────────
-// Runs drizzle-kit push on startup so missing tables are created automatically.
-// This is safe to run repeatedly — drizzle-kit push is idempotent.
 
 async function ensureDbSchema(): Promise<void> {
   try {
@@ -51,14 +51,23 @@ try {
 
 await ensureDbSchema();
 
-app.listen(port, (err) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
-    process.exit(1);
-  }
-  logger.info({ port }, "WebForge API Server listening");
+// ─── HTTP + WebSocket Server ──────────────────────────────────────────────────
+
+const server = http.createServer(app);
+
+initWebSocketServer(server);
+logger.info("WebForge Runtime Engine (WRE): WebSocket layer initialised");
+
+server.listen(port, () => {
+  logger.info({ port }, "WebForge Runtime Engine listening");
+  logger.info("WRE Architecture: User → AI Core → Ruflo → OpenClaw → WRE → Build → Health → Live URL");
 
   initCoreBot();
   initPaymentBot();
   logger.info("Telegram bots initialized");
+});
+
+server.on("error", (err) => {
+  logger.error({ err }, "HTTP server error");
+  process.exit(1);
 });

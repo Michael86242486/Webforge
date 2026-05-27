@@ -11,6 +11,8 @@ import Projects from "@/pages/projects";
 import Workspace from "@/pages/workspace";
 import Billing from "@/pages/billing";
 import Deploying from "@/pages/deploying";
+import Login from "@/pages/login";
+import RuntimeAdmin from "@/pages/runtime-admin";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,6 +27,8 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Landing} />
+      <Route path="/login" component={Login} />
+      <Route path="/runtime" component={RuntimeAdmin} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/projects" component={Projects} />
       <Route path="/workspace/:id" component={Workspace} />
