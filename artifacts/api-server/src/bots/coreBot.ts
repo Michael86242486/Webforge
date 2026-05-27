@@ -86,23 +86,34 @@ async function fireWpeWebhook(args: WpeWebhookArgs): Promise<void> {
     },
   };
 
+  // Strip any trailing slash so we never produce double-slashes in the final URL
+  const base = wpeUrl.replace(/\/+$/, "");
+  const webhookUrl = `${base}/api/webhook/project-ready`;
+  // Override preview URL with clean base too
+  payload.url = `${base}/preview/${args.projectSlug}/`;
+
   try {
-    const res = await fetch(`${wpeUrl}/api/webhook/project-ready`, {
+    const res = await fetch(webhookUrl, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "X-API-KEY": wpeKey,
+        "content-type": "application/json",
+        "x-api-key": wpeKey,           // lowercase — works with all HTTP frameworks
       },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(8000),
     });
     if (res.ok) {
-      logger.info({ projectSlug: args.projectSlug, framework, status: res.status }, "WPE webhook acknowledged");
+      logger.info({ projectSlug: args.projectSlug, framework, status: res.status, url: webhookUrl }, "WPE webhook acknowledged");
     } else {
-      logger.warn({ projectSlug: args.projectSlug, status: res.status }, "WPE webhook non-200 response");
+      let body = "";
+      try { body = await res.text(); } catch { /* ignore */ }
+      logger.warn({ projectSlug: args.projectSlug, status: res.status, body, url: webhookUrl }, "WPE webhook non-200 response");
+      console.error(`❌ WPE WEBHOOK NON-200 [${res.status}] for ${args.projectSlug}:`, body);
     }
   } catch (err) {
-    logger.warn({ err, projectSlug: args.projectSlug }, "WPE webhook delivery failed (non-fatal)");
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`❌ WPE WEBHOOK DELIVERY FAILED for ${args.projectSlug}:`, msg);
+    logger.warn({ err: msg, projectSlug: args.projectSlug, url: webhookUrl }, "WPE webhook delivery failed (non-fatal)");
   }
 }
 
@@ -1282,6 +1293,54 @@ export function initCoreBot(): void {
       `User has been notified.`,
       { parse_mode: "Markdown" }
     );
+  }));
+
+  // ── Admin-only: /wpe status ────────────────────────────────────────────────
+  bot.onText(/\/wpe(?:\s+status)?/, safeHandler(async (msg) => {
+    if (msg.from!.id !== ADMIN_TELEGRAM_ID) return; // silent denial for non-admins
+    const wpeUrl = process.env.WPE_API_URL;
+    const wpeKey = process.env.WPE_API_KEY;
+    if (!wpeUrl || !wpeKey) {
+      await safeSend(bot!, msg.chat.id, "⚠️ WPE credentials not configured in environment.");
+      return;
+    }
+    const base = wpeUrl.replace(/\/+$/, "");
+    sendTyping(bot!, msg.chat.id);
+    try {
+      const res = await fetch(`${base}/api/stats/overview`, {
+        headers: { "x-api-key": wpeKey },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) {
+        await safeSend(bot!, msg.chat.id, `❌ WPE returned HTTP ${res.status} — check server logs.`);
+        return;
+      }
+      const data = await res.json() as Record<string, unknown>;
+
+      // Parse known fields defensively — fall back to "N/A" for anything missing
+      const load       = data.systemLoad      != null ? String(data.systemLoad)      : "N/A";
+      const active     = data.activeSandboxes != null ? String(data.activeSandboxes) : "N/A";
+      const max        = data.maxSandboxes    != null ? String(data.maxSandboxes)    : "N/A";
+      const status     = typeof data.coreStatus === "string" ? data.coreStatus.toUpperCase() : "UNKNOWN";
+      const uptime     = data.uptime          != null ? String(data.uptime)          : "N/A";
+      const requests   = data.totalRequests   != null ? String(data.totalRequests)   : "N/A";
+      const statusIcon = status === "OPERATIONAL" ? "🟢" : status === "DEGRADED" ? "🟡" : "🔴";
+
+      await safeSend(bot!, msg.chat.id,
+        `⚡ *WPE INFRASTRUCTURE REPORT* ⚡\n\n` +
+        `${statusIcon} *Core Status:* ${status}\n` +
+        `🖥️ *System Load:* ${load}\n` +
+        `📦 *Active Sandboxes:* ${active} / ${max}\n` +
+        `⏱️ *Uptime:* ${uptime}\n` +
+        `📈 *Total Requests:* ${requests}\n\n` +
+        `_Queried live · ${new Date().toISOString()}_`,
+        { parse_mode: "Markdown" }
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("❌ WPE STATUS FETCH FAILED:", errMsg);
+      await safeSend(bot!, msg.chat.id, `❌ Could not reach WPE server: ${errMsg.slice(0, 200)}`);
+    }
   }));
 
   // ── Admin-only: /stats ─────────────────────────────────────────────────────

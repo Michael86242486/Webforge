@@ -1,68 +1,69 @@
 const express = require('express');
 const router = express.Router();
-const mockDatabase = require('../db/mockDatabase');
-const authMiddleware = require('../middleware/auth');
 
-router.use(authMiddleware);
-
-router.get('/tracks', (req, res) => {
-  const tracks = mockDatabase.getAllTracks();
-  res.json({
-    success: true,
-    tracks: tracks,
-    total: tracks.length,
-    message: 'Track catalog retrieved successfully'
-  });
-});
-
-router.get('/tracks/stream/:id', (req, res) => {
-  const trackId = parseInt(req.params.id);
-  const track = mockDatabase.getTrackById(trackId);
-  if (!track) {
-    return res.status(404).json({ success: false, error: 'Track not found' });
+router.post('/inquiry', (req, res) => {
+  const { name, email, message, cartItems } = req.body;
+  if (!name || !email || !message) {
+    return res.status(400).json({
+      success: false,
+      error: 'Name, email, and message are required fields'
+    });
   }
-  res.setHeader('Content-Type', 'audio/mpeg');
-  res.setHeader('Content-Disposition', `attachment; filename="${track.title}.mp3"`);
-  res.json({
-    success: true,
-    streamUrl: track.previewUrl,
-    track: track,
-    message: 'Streaming metadata ready'
-  });
-});
-
-router.post('/cart/inquire', (req, res) => {
-  const { cartItems, producerEmail, message } = req.body;
-  if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
-    return res.status(400).json({ success: false, error: 'Cart must contain at least one item' });
-  }
-  if (!producerEmail || !producerEmail.includes('@')) {
-    return res.status(400).json({ success: false, error: 'Valid producer email required' });
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid email format'
+    });
   }
   const inquiryId = 'INQ-' + Date.now() + '-' + Math.floor(Math.random() * 10000);
-  const total = cartItems.reduce((sum, item) => sum + (item.price || 0), 0);
-  const inquiry = {
-    inquiryId,
-    timestamp: new Date().toISOString(),
-    producerEmail,
-    message: message || 'Interested in licensing these tracks',
-    items: cartItems,
-    total: total,
-    status: 'pending'
-  };
-  mockDatabase.saveInquiry(inquiry);
-  res.status(201).json({
+  const totalValue = cartItems && Array.isArray(cartItems) 
+    ? cartItems.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0) 
+    : 0;
+  const response = {
     success: true,
-    inquiryId: inquiryId,
-    total: total,
-    message: 'Inquiry submitted successfully. Producer will contact you within 24 hours.',
-    estimatedResponse: '24 hours'
-  });
+    inquiryId,
+    message: 'Inquiry received successfully. Our team will contact you within 24 hours.',
+    details: {
+      name,
+      email,
+      submittedAt: new Date().toISOString(),
+      cartTotal: totalValue,
+      itemCount: cartItems ? cartItems.length : 0
+    }
+  };
+  res.status(201).json(response);
 });
 
-router.get('/cart/inquiries', (req, res) => {
-  const inquiries = mockDatabase.getAllInquiries();
-  res.json({ success: true, inquiries: inquiries });
+router.get('/github/sync', (req, res) => {
+  const syncData = {
+    success: true,
+    syncId: 'SYNC-' + Date.now(),
+    timestamp: new Date().toISOString(),
+    repository: 'vibeforge/releases',
+    status: 'completed',
+    changes: {
+      tracksUpdated: 3,
+      beatsAdded: 2,
+      metadataSynced: true,
+      lastCommit: 'a7f3b2c - Updated neon waveform visuals'
+    },
+    files: [
+      { name: 'midnight-drive.mp3', action: 'updated', size: '4.2MB' },
+      { name: 'neon-pulse.wav', action: 'added', size: '8.7MB' },
+      { name: 'portfolio.json', action: 'updated', size: '12KB' }
+    ]
+  };
+  res.json(syncData);
+});
+
+router.use((err, req, res, next) => {
+  console.error('API Error:', err);
+  res.status(err.status || 500).json({
+    success: false,
+    error: err.message || 'Internal server error',
+    timestamp: new Date().toISOString()
+  });
 });
 
 module.exports = router;
