@@ -42,17 +42,21 @@ small{color:#3e4f63;font-size:11px;margin-top:8px}</style>
   }
 });
 
-// ─── HTML URL Rewriting ───────────────────────────────────────────────────────
-// Intercepts HTML responses and rewrites absolute asset paths so CSS/JS/images
-// load correctly when the app is served through the path-based proxy.
+// ─── Unified URL Rewriting (HTML + CSS) ───────────────────────────────────────
+// Intercepts HTML and CSS responses. Rewrites absolute paths so assets load
+// correctly when the app is served through the path-based proxy.
 //
-// Before:  href="/style.css"         → browser requests /style.css (escapes proxy)
-// After:   href="style.css"          → browser requests relative to current path
-//          Also injects <base> tag so all relative URLs resolve correctly.
+// HTML: injects <base href="..."> + rewrites href/src/action="/..." attributes
+//       and url('/...') inside inline <style> blocks
+// CSS:  rewrites url('/...') and url("/...") in external CSS files
+//       @import '/...' → @import '${prefix}/...'
 
 proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: ServerResponse) => {
   const contentType = (proxyRes.headers["content-type"] ?? "").toLowerCase();
-  if (!contentType.includes("text/html")) return;
+  const isHtml = contentType.includes("text/html");
+  const isCss = contentType.includes("text/css");
+
+  if (!isHtml && !isCss) return;
 
   const projectKey = (req as Request & { __projectKey?: string }).__projectKey;
   if (!projectKey) return;
@@ -64,27 +68,50 @@ proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: Serv
   const chunks: Buffer[] = [];
   proxyRes.on("data", (chunk: Buffer) => chunks.push(chunk));
   proxyRes.on("end", () => {
-    let html = Buffer.concat(chunks).toString("utf8");
+    let body = Buffer.concat(chunks).toString("utf8");
     const prefix = `/api/preview-proxy/${projectKey}`;
 
-    // Inject <base> tag so relative paths resolve through the proxy prefix
-    if (!html.match(/<base\s/i)) {
-      if (html.match(/<head[^>]*>/i)) {
-        html = html.replace(/(<head[^>]*>)/i, `$1<base href="${prefix}/">`);
-      } else {
-        html = `<base href="${prefix}/">\n` + html;
+    if (isHtml) {
+      // Inject <base> tag so all relative paths resolve through the proxy prefix
+      if (!body.match(/<base\s/i)) {
+        if (body.match(/<head[^>]*>/i)) {
+          body = body.replace(/(<head[^>]*>)/i, `$1<base href="${prefix}/">`);
+        } else {
+          body = `<base href="${prefix}/">\n` + body;
+        }
       }
+
+      // Rewrite remaining absolute paths in HTML attributes
+      const prefixEscaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      body = body
+        // href="/path" src="/path" action="/path" → proxy-prefixed
+        .replace(
+          new RegExp(`(href|src|action|data-src)="\/(?!\/${prefixEscaped.slice(1)}|\/|api\/)`, "g"),
+          `$1="${prefix}/`
+        )
+        // url('/path') url("/path") url(/path) inside inline <style>
+        .replace(/url\(['"]?\/(?!\/|api\/preview-proxy\/)/g, `url('${prefix}/`);
+
+      // Rewrite srcset="/path" (used by <img srcset>)
+      body = body.replace(/srcset="([^"]+)"/g, (_match, srcset: string) => {
+        const fixed = srcset.replace(/(?:^|,\s*)(\/)(?!\/|api\/preview-proxy\/)/g, ` ${prefix}/`);
+        return `srcset="${fixed}"`;
+      });
+
+    } else if (isCss) {
+      // Rewrite url('/path') url("/path") url(/path) in external CSS files
+      body = body
+        .replace(/url\(\s*'\/(?!\/|api\/preview-proxy\/)/g, `url('${prefix}/`)
+        .replace(/url\(\s*"\/(?!\/|api\/preview-proxy\/)/g, `url("${prefix}/`)
+        .replace(/url\(\s*\/(?![\/']|api\/preview-proxy\/)/g, `url(${prefix}/`);
+
+      // Rewrite @import '/path' and @import "/path"
+      body = body
+        .replace(/@import\s+'\/(?!\/|api\/preview-proxy\/)/g, `@import '${prefix}/`)
+        .replace(/@import\s+"\/(?!\/|api\/preview-proxy\/)/g, `@import "${prefix}/`);
     }
 
-    // Rewrite any remaining absolute paths that slip through (e.g., href="/style.css")
-    // Guard against rewriting paths that already contain the proxy prefix
-    const prefixEscaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    html = html
-      .replace(new RegExp(`(href|src|action)="\/(?!\/${prefixEscaped.slice(1)}|\/|api\/)`, "g"),
-        `$1="${prefix}/`)
-      .replace(/url\(['"]?\/(?!\/|api\/preview-proxy\/)/g, `url('${prefix}/`);
-
-    const buf = Buffer.from(html, "utf8");
+    const buf = Buffer.from(body, "utf8");
 
     // Build clean headers — strip transfer-encoding (we're sending a fixed-length buffer)
     const headers: Record<string, string | string[] | undefined> = {};
@@ -95,7 +122,8 @@ proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: Serv
       }
     }
     headers["content-length"] = String(buf.length);
-    headers["content-type"] = "text/html; charset=utf-8";
+    if (isHtml) headers["content-type"] = "text/html; charset=utf-8";
+    if (isCss) headers["content-type"] = "text/css; charset=utf-8";
 
     if (!res.headersSent) {
       res.writeHead(proxyRes.statusCode ?? 200, headers as Record<string, string | string[]>);
@@ -104,7 +132,7 @@ proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: Serv
   });
 
   proxyRes.on("error", (err) => {
-    logger.error({ err }, "proxyRes error during HTML rewrite");
+    logger.error({ err }, "proxyRes error during content rewrite");
   });
 });
 
@@ -141,7 +169,7 @@ router.get("/projects/:projectKey/health", async (req: Request, res: Response) =
 
 // ─── Preview Proxy Handler ────────────────────────────────────────────────────
 // Two routes share one handler:
-//   /preview-proxy/:projectKey        → root path (Express 5 /*path needs ≥1 char)
+//   /preview-proxy/:projectKey        → root path
 //   /preview-proxy/:projectKey/*path  → all sub-paths
 
 const startingHtml = (projectKey: string) => `<!DOCTYPE html>
@@ -195,7 +223,7 @@ const proxyHandler: RequestHandler = async (req: Request, res: Response, _next: 
   const targetPort = project.port;
   const prefix = `/preview-proxy/${projectKey}`;
 
-  // Store projectKey on req so the proxyRes HTML-rewrite handler can access it
+  // Store projectKey on req so the proxyRes HTML/CSS-rewrite handler can access it
   (req as Request & { __projectKey?: string }).__projectKey = projectKey;
 
   req.url = req.url.replace(prefix, "") || "/";

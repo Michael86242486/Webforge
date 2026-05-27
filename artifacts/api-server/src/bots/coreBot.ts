@@ -14,12 +14,12 @@ import {
   runTerminalCommand, spawnProjectApp, pollAppHealth,
   assignProjectPort, findFreePort, syntaxAuditFiles, patchSyntaxError,
   generateReadme, gitCloneRepo, gitPushChanges, selfHealApp,
-  triBrainBuildFiles,
+  superOrchestratorBuild,
   watchProjectDir, stopProjectWatcher, getProjectLogs, stopSupervisedProcess,
   RUFLO_PERSONA_MATRIX,
   rufloDispatch, rufloDeleteDiscovery, rufloDeletePending,
   rufloGetPending, rufloAddHistory,
-  type PlanningResult, type TriBrainResult,
+  type PlanningResult, type SuperOrchestratorResult,
 } from "../engines/orchestrator.js";
 import {
   broadcastProgress, broadcastRedirect, broadcastStatus, broadcastToProject,
@@ -353,14 +353,14 @@ async function runFullBuild(
     // Phase 2 (Grok-3) + Phase 3 (Dev-X) happen here per-file.
     broadcastProgress(pid, 20, `Phase 2: Grok-3 synthesizing ${plan.manifest.length} files...`, 0, plan.manifest.length);
     await safeSend(bot, chatId,
-      `🧠 *Tri-Brain Activated*\n\n` +
+      `⚡ *Super Orchestrator Activated*\n\n` +
       `✅ Mistral designed the architecture\n` +
-      `⚡ Grok-3 synthesizing each file (${plan.manifest.length} files)...\n` +
-      `🛡️ Dev-X will audit JS files before write`,
+      `🚀 Parallel subagents synthesizing ${plan.manifest.length} files (batch/8)...\n` +
+      `🛡️ Dev-X syntax audit running on all JS/TS files`,
       { parse_mode: "Markdown" }
     );
 
-    const triBrainResult: TriBrainResult = await triBrainBuildFiles(
+    const triBrainResult: SuperOrchestratorResult = await superOrchestratorBuild(
       workDir, description, plan, telegramId,
       (n, total, filePath, phase) => {
         const pct = 20 + (n / Math.max(total, 1)) * 55;
@@ -375,7 +375,7 @@ async function runFullBuild(
     const written = triBrainResult.written;
 
     await safeSend(bot, chatId,
-      `✅ *Tri-Brain Synthesis Complete*\n` +
+      `✅ *Super Orchestrator Complete*\n` +
       `📁 *${written} files written* — Cost: $${triBrainResult.totalCostUsd.toFixed(4)}` +
       (triBrainResult.phaseErrors.length > 0
         ? `\n⚠️ ${triBrainResult.phaseErrors.length} phase error(s) — fallback stubs used`
@@ -384,7 +384,7 @@ async function runFullBuild(
     );
 
     recordTelemetry({
-      sessionId: pid, userId: telegramId, action: "tribrain_build",
+      sessionId: pid, userId: telegramId, action: "super_orchestrator_build",
       model: "grok-3+dev-x", inputTokens: 0, outputTokens: 0,
       costUsd: triBrainResult.totalCostUsd,
     }).catch(() => {});

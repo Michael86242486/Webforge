@@ -958,29 +958,37 @@ export async function buildProjectFiles(
   return written;
 }
 
-// ─── Tri-Brain Ensemble — Per-File Synthesis Engine ──────────────────────────
+// ─── Super Orchestrator Engine — Parallel Subagent Synthesis ─────────────────
+// Replaces the old TriBrain system with a faster, cleaner multi-agent engine.
+// Each file is routed to a specialized subagent:
+//   frontend (HTML/CSS/JS)  → Mistral  (UI design, animations, responsive layouts)
+//   backend  (server files) → Grok-3   (Express, APIs, data flows)
+//   simple   (md/env/txt)   → grok-3-mini
+// All subagents run in parallel batches of 8, then Dev-X audits complex files.
 
-export interface TriBrainResult {
+export interface SuperOrchestratorResult {
   written: number;
   totalCostUsd: number;
   phaseErrors: string[];
 }
 
+/** @deprecated Use superOrchestratorBuild instead */
+export type TriBrainResult = SuperOrchestratorResult;
+
 /**
- * Tri-Brain Build Pipeline:
- *   Phase 2 — Grok-3 synthesizes each file individually (dedicated 8192-token window per file)
- *   Phase 3 — Dev-X audits and repairs JS/TS files before writing to disk
- *
- * Eliminates truncation (each file gets full context window) and context contamination
- * (each file prompt is scoped to that file only).
+ * Super Orchestrator Build Pipeline:
+ *   Phase 1 — package.json first (dependency context for all other agents)
+ *   Phase 2 — All files generated in parallel batches of 8, each file in its own context window
+ *   Phase 3 — Dev-X syntax audit + auto-repair for JS/TS files
+ *   Phase 4 — Smart dependency enrichment (scan + patch package.json)
  */
-export async function triBrainBuildFiles(
+export async function superOrchestratorBuild(
   workDir: string,
   projectDescription: string,
   plan: PlanningResult,
   telegramId: number,
   onFileWritten: (written: number, total: number, filePath: string, phase: string) => void,
-): Promise<TriBrainResult> {
+): Promise<SuperOrchestratorResult> {
   const manifest = plan.manifest;
   const colorScheme = plan.colorScheme
     ?? "Dark background #0a0e14, primary accent #58a6ff (electric blue), success #3fb950, text #cdd9e5";
@@ -1065,7 +1073,7 @@ export async function triBrainBuildFiles(
   let diskContext: string | undefined;
   try {
     diskContext = await scanWorkspaceDirContext(workDir);
-    if (diskContext) console.log(`[TriBrain] 🗂️ Ground truth scan: ${diskContext.split("\n").length} lines`);
+    if (diskContext) console.log(`[SuperOrchestrator] 🗂️ Ground truth scan: ${diskContext.split("\n").length} lines`);
   } catch { /* non-fatal */ }
 
   // ── Per-file generator with integrity gate + Dev-X audit ──────────────────
@@ -1091,17 +1099,17 @@ export async function triBrainBuildFiles(
       const result = await routeTaskForModel(model, buildPrompt(file, pkgCtx, diskContext), sysPrompt, telegramId, maxToks);
       content = stripFences(result.content);
       costUsd += result.costUsd;
-      console.log(`[TriBrain] ✓ ${model}[${lane}] → ${file.path} (${content.length} chars)`);
+      console.log(`[SuperOrchestrator] ✓ ${model}[${lane}] → ${file.path} (${content.length} chars)`);
     } catch (err) {
       phaseErrors.push(`${model} failed for ${file.path}: ${String(err).slice(0, 100)}`);
-      logger.warn({ file: file.path, err }, "triBrainBuildFiles: primary generation failed");
+      logger.warn({ file: file.path, err }, "superOrchestratorBuild: primary generation failed");
       content = generateStubContent(file.path, file.description, plan.techStack);
       phase = "stub";
     }
 
     // Integrity gate: escalate to Dev-X if content is too thin
     if (!simple && content.trim().length < 80) {
-      console.log(`[TriBrain] ❌ Integrity fail ${file.path} (${content.length} chars) → Dev-X repair`);
+      console.log(`[SuperOrchestrator] ❌ Integrity fail ${file.path} (${content.length} chars) → Dev-X repair`);
       try {
         const repairPrompt =
           `The file "${file.path}" is critically incomplete. Write COMPLETE production-ready code now.\n\n` +
@@ -1113,7 +1121,7 @@ export async function triBrainBuildFiles(
           content = repaired;
           costUsd += repair.costUsd;
           phase = "Dev-X-repair";
-          console.log(`[TriBrain] 🔧 Dev-X repaired ${file.path} → ${repaired.length} chars`);
+          console.log(`[SuperOrchestrator] 🔧 Dev-X repaired ${file.path} → ${repaired.length} chars`);
         }
       } catch (repairErr) {
         phaseErrors.push(`Dev-X repair failed for ${file.path}: ${String(repairErr).slice(0, 80)}`);
@@ -1134,10 +1142,10 @@ export async function triBrainBuildFiles(
           content = audited;
           costUsd += audit.costUsd;
           phase = phase === "stub" ? "Dev-X" : `${phase}+Dev-X`;
-          console.log(`[TriBrain] 🛡️ Dev-X audited ${file.path} → ${audited.length} chars`);
+          console.log(`[SuperOrchestrator] 🛡️ Dev-X audited ${file.path} → ${audited.length} chars`);
         }
       } catch (auditErr) {
-        logger.warn({ file: file.path, err: auditErr }, "triBrainBuildFiles: Dev-X audit skipped (non-fatal)");
+        logger.warn({ file: file.path, err: auditErr }, "superOrchestratorBuild: Dev-X audit skipped (non-fatal)");
       }
     }
 
@@ -1148,7 +1156,7 @@ export async function triBrainBuildFiles(
   let pkgJsonContent: string | undefined;
   const pkgFile = manifest.find(f => f.path === "package.json");
   if (pkgFile) {
-    console.log(`[TriBrain] 📦 Step 1 — Generating package.json first for dependency context...`);
+    console.log(`[SuperOrchestrator] 📦 Step 1 — Generating package.json first for dependency context...`);
     const { content, costUsd, phase } = await generateFile(pkgFile);
     pkgJsonContent = content;
     totalCostUsd += costUsd;
@@ -1158,19 +1166,19 @@ export async function triBrainBuildFiles(
     recordFileDiff(String(telegramId), pkgFile.path, content);
     written++;
     onFileWritten(written, manifest.length, pkgFile.path, phase);
-    console.log(`[TriBrain] ✅ package.json ready — ${content.length} chars [${phase}]`);
+    console.log(`[SuperOrchestrator] ✅ package.json ready — ${content.length} chars [${phase}]`);
   }
 
   // ── Step 2: Generate all remaining files in parallel batches of 5 ─────────
   const remaining = manifest.filter(f => f.path !== "package.json");
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 8;
   const totalFiles = manifest.length;
 
   for (let batchStart = 0; batchStart < remaining.length; batchStart += BATCH_SIZE) {
     const batch = remaining.slice(batchStart, batchStart + BATCH_SIZE);
     const batchNum = Math.floor(batchStart / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(remaining.length / BATCH_SIZE);
-    console.log(`[TriBrain] 🚀 Step 2 — Parallel batch ${batchNum}/${totalBatches}: [${batch.map(f => f.path).join(", ")}]`);
+    console.log(`[SuperOrchestrator] 🚀 Step 2 — Parallel batch ${batchNum}/${totalBatches}: [${batch.map(f => f.path).join(", ")}]`);
 
     // Generate all files in batch simultaneously
     const results = await Promise.allSettled(
@@ -1189,7 +1197,7 @@ export async function triBrainBuildFiles(
       } else {
         phaseErrors.push(`Batch generation failed for ${file.path}: ${String(result.reason).slice(0, 80)}`);
         content = generateStubContent(file.path, file.description, plan.techStack);
-        console.log(`[TriBrain] ⚠️ Fallback stub for ${file.path}`);
+        console.log(`[SuperOrchestrator] ⚠️ Fallback stub for ${file.path}`);
       }
 
       totalCostUsd += costUsd;
@@ -1209,7 +1217,7 @@ export async function triBrainBuildFiles(
       const phase = r.status === "fulfilled" ? r.value.phase : "error";
       onFileWritten(written, totalFiles, file.path, phase);
       if (r.status === "fulfilled") {
-        console.log(`[TriBrain] ✅ ${written}/${totalFiles} — ${file.path} [${phase}]`);
+        console.log(`[SuperOrchestrator] ✅ ${written}/${totalFiles} — ${file.path} [${phase}]`);
       }
     });
   }
@@ -1252,18 +1260,18 @@ export async function triBrainBuildFiles(
         }
         if (enriched > 0) {
           await fs.writeFile(pkgPath, JSON.stringify(existing, null, 2), "utf8");
-          console.log(`[TriBrain] 📦 package.json enriched with ${enriched} auto-detected packages: ${[...allPkgs].join(", ")}`);
+          console.log(`[SuperOrchestrator] 📦 package.json enriched with ${enriched} auto-detected packages: ${[...allPkgs].join(", ")}`);
         }
       } catch (pkgErr) {
-        logger.warn({ pkgErr }, "TriBrain: package.json enrichment failed (non-fatal)");
+        logger.warn({ pkgErr }, "SuperOrchestrator: package.json enrichment failed (non-fatal)");
       }
     }
   } catch (depErr) {
-    logger.warn({ depErr }, "TriBrain: smart dep extraction failed (non-fatal)");
+    logger.warn({ depErr }, "SuperOrchestrator: smart dep extraction failed (non-fatal)");
   }
 
-  logger.info({ written, totalCostUsd, errors: phaseErrors.length }, "triBrainBuildFiles: complete");
-  console.log(`[TriBrain] 🏁 Complete — ${written} files, $${totalCostUsd.toFixed(4)}, ${phaseErrors.length} errors`);
+  logger.info({ written, totalCostUsd, errors: phaseErrors.length }, "superOrchestratorBuild: complete");
+  console.log(`[SuperOrchestrator] 🏁 Complete — ${written} files, $${totalCostUsd.toFixed(4)}, ${phaseErrors.length} errors`);
   return { written, totalCostUsd, phaseErrors };
 }
 
@@ -1939,3 +1947,6 @@ export async function spliceCodeIntoFile(
     return false;
   }
 }
+
+/** @deprecated Use superOrchestratorBuild — kept for backward compatibility */
+export const triBrainBuildFiles = superOrchestratorBuild;

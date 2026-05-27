@@ -1,68 +1,79 @@
 const express = require('express');
 const router = express.Router();
 
-function validateInquiry(body) {
-  const errors = [];
-  if (!body || typeof body !== 'object') {
-    errors.push('Request body must be a valid object');
-    return errors;
-  }
-  if (!.name || typeof body.name !== 'string' || body.name.trim().length < 2) {
-    errors.push('Name is required and must be at least 2 characters');
-  }
-  if (!body.email || typeof body.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
-    errors.push('Valid email address is required');
-  }
-  if (!body.trackIds || !Array.isArray(body.trackIds) || body.trackIds.length === 0) {
-    errors.push('At least one track ID must be selected');
-  }
-  if (body.message && typeof body.message === 'string' && body.message.length > 500) {
-    errors.push('Message cannot exceed 500 characters');
-  }
-  if (body.budget && (typeof body.budget !== 'number' || body.budget < 0)) {
-    errors.push('Budget must be a positive number');
-  }
-  return errors;
-}
-
-router.post('/', (req, res, next) => {
-  try {
-    const validationErrors = validateInquiry(req.body);
-    if (validationErrors.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Validation failed',
-        details: validationErrors
-      });
-    }
-
-    const inquiry = {
-      id: 'inq_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
-      name: req.body.name.trim(),
-      email: req.body.email.toLowerCase().trim(),
-      trackIds: req.body.trackIds,
-      message: req.body.message ? req.body.message.trim() : '',
-      budget: req.body.budget || null,
-      timestamp: new Date().toISOString(),
-      status: 'received'
-    };
-
-    console.log('[VibeForge] New cart inquiry received:', inquiry.id);
-
-    res.status(201).json({
-      success: true,
-      message: 'Inquiry submitted successfully. Our team will contact you within 24 hours.',
-      inquiry: inquiry
-    });
-  } catch (err) {
-    next(err);
-  }
-});
+let inquiries = [];
+let nextId = 1;
 
 router.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Inquiry endpoint is active. Use POST to submit cart inquiries.'
+    count: inquiries.length,
+    inquiries: inquiries.slice().reverse()
+  });
+});
+
+router.post('/', (req, res) => {
+  const { name, email, message, cartItems, total } = req.body;
+
+  if (!name || !email || !cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'Name, email, and at least one cart item are required'
+    });
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid email format'
+    });
+  }
+
+  const inquiry = {
+    id: nextId++,
+    name: name.trim(),
+    email: email.trim().toLowerCase(),
+    message: message ? message.trim() : '',
+    cartItems: cartItems.map(item => ({
+      id: item.id,
+      title: item.title,
+      price: parseFloat(item.price) || 0,
+      license: item.license || 'standard'
+    })),
+    total: parseFloat(total) || cartItems.reduce((sum, item) => sum + (parseFloat(item.price) || 0), 0),
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    reference: 'VIB' + Date.now().toString().slice(-8)
+  };
+
+  inquiries.push(inquiry);
+
+  if (inquiries.length > 50) {
+    inquiries.shift();
+  }
+
+  res.status(201).json({
+    success: true,
+    message: 'Inquiry submitted successfully. Our team will contact you within 24 hours.',
+    inquiry: inquiry
+  });
+});
+
+router.get('/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  const inquiry = inquiries.find(i => i.id === id);
+
+  if (!inquiry) {
+    return res.status(404).json({
+      success: false,
+      error: 'Inquiry not found'
+    });
+  }
+
+  res.json({
+    success: true,
+    inquiry: inquiry
   });
 });
 

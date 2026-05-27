@@ -19,6 +19,9 @@ import {
   ensureProjectDir,
   PROJECTS_BASE_DIR,
   writeFilesParallel,
+  gitInitRepo,
+  gitPushChanges,
+  runTerminalCommand,
 } from "../engines/orchestrator.js";
 import { broadcastToProject, broadcastLog, broadcastStatus, broadcastRuntimeEvent } from "../lib/websocket-manager.js";
 import { requireAuth, optionalAuth } from "../middlewares/jwt-auth.js";
@@ -292,6 +295,86 @@ router.post("/runtime/delete", optionalAuth, async (req: Request, res: Response)
   } catch { /* best-effort */ }
 
   res.json({ success: true, projectId, message: "Project deleted" });
+});
+
+// ─── POST /runtime/github/push ────────────────────────────────────────────────
+// Push a project's files to a GitHub repository using the user's personal token.
+
+router.post("/runtime/github/push", optionalAuth, async (req: Request, res: Response) => {
+  const {
+    projectId,
+    githubToken,
+    repoName,
+    commitMessage,
+    username,
+  } = req.body as {
+    projectId?: string;
+    githubToken?: string;
+    repoName?: string;
+    commitMessage?: string;
+    username?: string;
+  };
+
+  if (!projectId || !githubToken || !repoName) {
+    res.status(400).json({ error: "projectId, githubToken, and repoName are required" });
+    return;
+  }
+
+  const entry = runtimeRegistry.get(projectId);
+  if (!entry) {
+    res.status(404).json({ error: `Project "${projectId}" not found in runtime registry` });
+    return;
+  }
+
+  const workDir = entry.workDir;
+  const finalUsername = username ?? "webforge-user";
+  const remoteUrl = `https://github.com/${finalUsername}/${repoName}.git`;
+  const message = commitMessage ?? `WebForge deploy: ${projectId} [${new Date().toISOString()}]`;
+
+  try {
+    appendRuntimeLog(entry, `🔗 GitHub Push: initializing for ${remoteUrl}`);
+
+    // Check if git repo already exists
+    const hasGit = fsSync.existsSync(path.join(workDir, ".git"));
+
+    if (!hasGit) {
+      appendRuntimeLog(entry, `📦 Initializing git repository...`);
+      await gitInitRepo(workDir, remoteUrl, githubToken);
+      appendRuntimeLog(entry, `✅ GitHub Push: repository created and pushed to ${remoteUrl}`);
+    } else {
+      // Repo exists — configure remote with token and push
+      appendRuntimeLog(entry, `🔄 GitHub Push: pushing changes to existing repo...`);
+      const authUrl = remoteUrl.replace("https://", `https://${githubToken}@`);
+
+      try {
+        await runTerminalCommand(
+          `git remote set-url origin "${authUrl}" 2>/dev/null || git remote add origin "${authUrl}"`,
+          workDir,
+          10_000
+        );
+      } catch { /* remote may already be set */ }
+
+      await gitPushChanges(workDir, githubToken, message);
+      appendRuntimeLog(entry, `✅ GitHub Push: changes pushed successfully`);
+    }
+
+    res.json({
+      success: true,
+      projectId,
+      repoUrl: `https://github.com/${finalUsername}/${repoName}`,
+      commitMessage: message,
+      message: `Successfully pushed to ${repoName}`,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    appendRuntimeLog(entry, `❌ GitHub Push failed: ${msg.slice(0, 200)}`);
+    logger.error({ err, projectId, repoName }, "WRE: GitHub push failed");
+    res.status(500).json({
+      error: "GitHub push failed",
+      detail: msg.slice(0, 300),
+      hint: "Ensure the repo exists on GitHub, the token has 'repo' scope, and the username is correct.",
+    });
+  }
 });
 
 // ─── GET /runtime/status/:id ──────────────────────────────────────────────────
