@@ -1,0 +1,235 @@
+@keyframes neonPulse {
+  0%, 100% {
+    box-shadow: 0 0 5px #00ff9d, 0 0 10px #00ff9d, 0 0 15px #00ff9d, 0 0 20px #00ff9d;
+  }
+  50% {
+    box-shadow: 0 0 10px #00ff9d, 0 0 20px #00ff9d, 0 0 30px #00ff9d, 0 0 40px #00ff9d;
+  }
+}
+
+@keyframes hotPinkPulse {
+  0%, 100% {
+    box-shadow: 0 0 5px #ff2a6d, 0 0 10px #ff2a6d, 0 0 15px #ff2a6d, 0 0 20px #ff2a6d;
+  }
+  50% {
+    box-shadow: 0 0 10px #ff2a6d, 0 0 20px #ff2a6d, 0 0 30px #ff2a6d, 0 0 40px #ff2a6d;
+  }
+}
+
+@keyframes neonGlow {
+  0% {
+    text-shadow: 0 0 2px #00ff9d, 0 0 5px #00ff9d;
+  }
+  50% {
+    text-shadow: 0 0 5px #00ff9d, 0 0 10px #00ff9d, 0 0 15px #00ff9d;
+  }
+  100% {
+    text-shadow: 0 0 2px #00ff9d, 0 0 5px #00ff9d;
+  }
+}
+
+@keyframes hotPinkGlow {
+  0% {
+    text-shadow: 0 0 2px #ff2a6d, 0 0 5px #ff2a6d;
+  }
+  50% {
+    text-shadow: 0 0 5px #ff2a6d, 0 0 10px #ff2a6d, 0 0 15px #ff2a6d;
+  }
+  100% {
+    text-shadow: 0 0 2px #ff2a6d, 0 0 5px #ff2a6d;
+  }
+}
+
+@keyframes gradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes glassMorphIn {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+    backdrop-filter: blur(0px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    backdrop-filter: blur(10px);
+  }
+}
+
+@keyframes slideInRight {
+  0% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInLeft {
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fadeInUp {
+  0% {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes progressBarGlow {
+  0% {
+    box-shadow: 0 0 5px #00ff9d inset;
+  }
+  50% {
+    box-shadow: 0 0 15px #00ff9d inset, 0 0 20px #00ff9d;
+  }
+  100% {
+    box-shadow: 0 0 5px #00ff9d inset;
+  }
+}
+
+@keyframes buttonHoverGlow {
+  0% {
+    box-shadow: 0 0 5px rgba(0, 255, 157, 0.4);
+  }
+  100% {
+    box-shadow: 0 0 20px rgba(0, 255, 157, 0.8), 0 0 30px rgba(0, 255, 157, 0.6);
+  }
+}
+
+@keyframes cartItemFadeIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes audioWave {
+  0%, 100% {
+    transform: scaleY(0.5);
+  }
+  50% {
+    transform: scaleY(1.2);
+  }
+}
+
+@keyframes borderNeonPulse {
+  0%, 100% {
+    border-color: rgba(0, 255, 157, 0.3);
+  }
+  50% {
+    border-color: rgba(0, 255, 157, 0.8);
+  }
+}
+
+.neon-pulse {
+  animation: neonPulse 2s infinite ease-in-out;
+}
+
+.hot-pink-pulse {
+  animation: hotPinkPulse 2s infinite ease-in-out;
+}
+
+.neon-glow {
+  animation: neonGlow 2s infinite ease-in-out;
+}
+
+.hot-pink-glow {
+  animation: hotPinkGlow 2s infinite ease-in-out;
+}
+
+.gradient-shift {
+  background: linear-gradient(90deg, #00ff9d, #ff2a6d, #00ff9d);
+  background-size: 200% 200%;
+  animation: gradientShift 5s infinite linear;
+}
+
+.glass-morph-in {
+  animation: glassMorphIn 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.slide-in-right {
+  animation: slideInRight 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.slide-in-left {
+  animation: slideInLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.fade-in-up {
+  animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.progress-bar-glow {
+  animation: progressBarGlow 1.5s infinite ease-in-out;
+}
+
+.button-hover-glow:hover {
+  animation: buttonHoverGlow 0.4s ease-out forwards;
+}
+
+.cart-item-fade-in {
+  animation: cartItemFadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.audio-wave {
+  animation: audioWave 0.5s infinite ease-in-out;
+}
+
+.border-neon-pulse {
+  animation: borderNeonPulse 2s infinite ease-in-out;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 2s linear infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, rgba(0, 255, 157, 0) 0%, rgba(0, 255, 157, 0.2) 50%, rgba(0, 255, 157, 0) 100%);
+  background-size: 1000px 100%;
+  animation: shimmer 3s infinite linear;
+}

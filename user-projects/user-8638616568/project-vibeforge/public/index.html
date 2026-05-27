@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VibeForge | Premium Music Portfolio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/animations.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Neon Background Animation -->
+        <div class="neon-grid"></div>
+
+        <!-- Header -->
+        <header class="header glassmorphism">
+            <div class="header-content">
+                <div class="logo">
+                    <span class="logo-icon">&#9835;</span>
+                    <h1 class="logo-text">VIBEFORGE</h1>
+                </div>
+                <nav class="main-nav">
+                    <ul class="nav-list">
+                        <li><a href="#" class="nav-link active">Home</a></li>
+                        <li><a href="#" class="nav-link">Tracks</a></li>
+                        <li><a href="#" class="nav-link">Producers</a></li>
+                        <li><a href="#" class="nav-link">About</a></li>
+                    </ul>
+                </nav>
+                <button class="cart-toggle-btn glassmorphism" id="cartToggleBtn">
+                    <span class="cart-icon">&#128722;</span>
+                    <span class="cart-count" id="cartCount">0</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <section class="hero-section">
+                <div class="hero-content glassmorphism">
+                    <h2 class="hero-title">FORGE YOUR SOUND</h2>
+                    <p class="hero-subtitle">Premium beats from independent producers. Discover, preview, and license exclusive tracks.</p>
+                    <div class="hero-cta">
+                        <button class="btn btn-primary neon-glow">Browse Tracks</button>
+                        <button class="btn btn-secondary">Learn More</button>
+                    </div>
+                </div>
+                <div class="hero-visual">
+                    <div class="audio-waveform">
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="tracks-section">
+                <div class="section-header">
+                    <h2 class="section-title">FEATURED TRACKS</h2>
+                    <div class="section-filters">
+                        <select class="filter-select glassmorphism" id="genreFilter">
+                            <option value="all">All Genres</option>
+                            <option value="hiphop">Hip Hop</option>
+                            <option value="edm">EDM</option>
+                            <option value="rnb">R&B</option>
+                            <option value="pop">Pop</option>
+                        </select>
+                        <select class="filter-select glassmorphism" id="bpmFilter">
+                            <option value="all">All BPM</option>
+                            <option value="slow">Slow (60-90)</option>
+                            <option value="medium">Medium (90-120)</option>
+                            <option value="fast">Fast (120+)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="tracks-grid" id="tracksGrid">
+                    <!-- Tracks will be dynamically inserted here by app.js -->
+                </div>
+            </section>
+        </main>
+
+        <!-- Audio Player -->
+        <div class="audio-player glassmorphism" id="audioPlayer">
+            <div class="player-header">
+                <h3 class="player-title" id="playerTitle">Now Playing</h3>
+                <button class="player-close-btn" id="playerCloseBtn">&times;</button>
+            </div>
+            <div class="player-content">
+                <div class="player-artwork">
+                    <div class="artwork-placeholder" id="playerArtwork"></div>
+                </div>
+                <div class="player-controls">
+                    <div class="player-meta">
+                        <span class="track-title" id="trackTitle">Track Title</span>
+                        <span class="track-artist" id="trackArtist">Artist Name</span>
+                    </div>
+                    <div class="player-progress">
+                        <div class="progress-bar" id="progressBar">
+                            <div class="progress-fill" id="progressFill"></div>
+                        </div>
+                        <div class="progress-time">
+                            <span id="currentTime">0:00</span>
+                            <span id="duration">0:00</span>
+                        </div>
+                    </div>
+                    <div class="player-buttons">
+                        <button class="player-btn" id="shuffleBtn">&#128256;</button>
+                        <button class="player-btn" id="prevBtn">&#9664;&#9664;</button>
+                        <button class="player-btn player-play-btn" id="playPauseBtn">&#9654;</button>
+                        <button class="player-btn" id="nextBtn">&#9654;&#9654;</button>
+                        <button class="player-btn" id="repeatBtn">&#128257;</button>
+                    </div>
+                    <div class="player-volume">
+                        <span class="volume-icon">&#128266;</span>
+                        <input type="range" id="volumeSlider" min="0" max="100" value="70">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Shopping Cart Sidebar -->
+        <aside class="cart-sidebar glassmorphism" id="cartSidebar">
+            <div class="cart-header">
+                <h2 class="cart-title">YOUR CART</h2>
+                <button class="cart-close-btn" id="cartCloseBtn">&times;</button>
+            </div>
+            <div class="cart-content" id="cartContent">
+                <!-- Cart items will be dynamically inserted here by cart.js -->
+                <div class="cart-empty">
+                    <span class="empty-icon">&#128722;</span>
+                    <p>Your cart is empty</p>
+                    <p class="empty-subtext">Add tracks to get started</p>
+                </div>
+            </div>
+            <div class="cart-footer">
+                <div class="cart-total">
+                    <span>Total:</span>
+                    <span class="total-amount" id="cartTotal">$0.00</span>
+                </div>
+                <button class="btn btn-primary btn-full" id="checkoutBtn">Proceed to Checkout</button>
+            </div>
+        </aside>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-content">
+                <div class="footer-brand">
+                    <span class="logo-icon">&#9835;</span>
+                    <h3 class="footer-logo">VIBEFORGE</h3>
+                </div>
+                <div class="footer-links">
+                    <div class="footer-column">
+                        <h4>Explore</h4>
+                        <ul>
+                            <li><a href="#">Tracks</a></li>
+                            <li><a href="#">Producers</a></li>
+                            <li><a href="#">Genres</a></li>
+                            <li><a href="#">New Releases</a></li>
+                        </ul>
+                    </div>
+                    <div class="footer-column">
+                        <h4>Support</h4>
+                        <ul>
+                            <li><a href="#">Help Center</a></li>
+                            <li><a href="#">Licensing</a></li>
+                            <li><a href="#">Contact</a></li>
+                            <li><a href="#">FAQ</a></li>
+                        </ul>
+                    </div>
+                    <div class="footer-column">
+                        <h4>Legal</h4>
+                        <ul>
+                            <li><a href="#">Terms</a></li>
+                            <li><a href="#">Privacy</a></li>
+                            <li><a href="#">Cookies</a></li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="footer-social">
+                    <a href="#" class="social-link">&#127925;</a>
+                    <a href="#" class="social-link">&#128187;</a>
+                    <a href="#" class="social-link">&#127909;</a>
+                    <a href="#" class="social-link">&#128241;</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2026 VibeForge. All rights reserved.</p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Overlay for modals/sidebars -->
+    <div class="overlay" id="overlay"></div>
+
+    <script src="js/audioPlayer.js"></script>
+    <script src="js/cart.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
