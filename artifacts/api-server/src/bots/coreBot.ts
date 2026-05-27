@@ -38,6 +38,74 @@ const PLATFORM_URL = (() => {
   return d ? `https://${d}` : "https://webforge.replit.app";
 })();
 
+// ─── WPE Integration ──────────────────────────────────────────────────────────
+
+function detectFramework(techStack: string): string {
+  const s = techStack.toLowerCase();
+  if (s.includes("next")) return "nextjs";
+  if (s.includes("react") && s.includes("vite")) return "react-vite";
+  if (s.includes("react")) return "react";
+  if (s.includes("express")) return "express";
+  if (s.includes("fastify")) return "fastify";
+  if (s.includes("koa")) return "koa";
+  if (s.includes("flask")) return "flask";
+  if (s.includes("django")) return "django";
+  if (s.includes("html")) return "html";
+  return "node";
+}
+
+interface WpeWebhookArgs {
+  projectSlug: string;
+  techStack: string;
+  health: number;
+  liveUrl: string;
+  telegramId: number;
+  username?: string;
+}
+
+async function fireWpeWebhook(args: WpeWebhookArgs): Promise<void> {
+  const wpeUrl = process.env.WPE_API_URL;
+  const wpeKey = process.env.WPE_API_KEY;
+  if (!wpeUrl || !wpeKey) {
+    logger.warn("WPE_API_URL or WPE_API_KEY not set — skipping WPE webhook");
+    return;
+  }
+
+  const framework = detectFramework(args.techStack);
+  const owner = args.username ? `@${args.username}` : `tg:${args.telegramId}`;
+
+  const payload = {
+    projectId: args.projectSlug,
+    event: "build.complete",
+    owner,
+    framework,
+    url: `${wpeUrl}/preview/${args.projectSlug}/`,
+    payload: {
+      health: args.health,
+      buildTime: 3000,
+    },
+  };
+
+  try {
+    const res = await fetch(`${wpeUrl}/api/webhook/project-ready`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": wpeKey,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.ok) {
+      logger.info({ projectSlug: args.projectSlug, framework, status: res.status }, "WPE webhook acknowledged");
+    } else {
+      logger.warn({ projectSlug: args.projectSlug, status: res.status }, "WPE webhook non-200 response");
+    }
+  } catch (err) {
+    logger.warn({ err, projectSlug: args.projectSlug }, "WPE webhook delivery failed (non-fatal)");
+  }
+}
+
 // ─── Slug helpers ─────────────────────────────────────────────────────────────
 
 function slugify(name: string): string {
@@ -384,6 +452,16 @@ async function runFullBuild(
 
     // ── Check for GitHub auto-push ────────────────────────────────────────
     const userRow = await db.select().from(usersTable).where(eq(usersTable.telegramId, telegramId)).limit(1);
+
+    // ── WPE fire-and-forget build event ──────────────────────────────────
+    fireWpeWebhook({
+      projectSlug: projectKey,
+      techStack: plan.techStack,
+      health: isLive ? 100 : 0,
+      liveUrl,
+      telegramId,
+      username: (userRow[0] as { username?: string })?.username,
+    }).catch(() => {});
     const ghToken = userRow[0]?.githubToken ? decrypt(userRow[0].githubToken) : null;
 
     if (isLive) {
