@@ -7,7 +7,7 @@ import {
 import { encrypt, decrypt } from "../utils/crypto.js";
 import { recordTelemetry } from "../utils/telemetry.js";
 import { safeSend, sendTyping, safeDelete, escapeMd } from "../utils/telegram.js";
-import { db, usersTable, projectsTable, paymentsTable } from "@workspace/db";
+import { db, usersTable, projectsTable, paymentsTable, wpeWebhookLogsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import {
   ensureProjectDir, scaffoldBotProject, spawnBotProcess,
@@ -91,28 +91,45 @@ async function fireWpeWebhook(args: WpeWebhookArgs): Promise<void> {
   const webhookUrl = `${base}/api/webhook/project-ready`;
   // payload.url already set to the real live proxy URL — no override needed
 
+  let deliveryStatus = "UNKNOWN";
   try {
     const res = await fetch(webhookUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": wpeKey,           // lowercase — works with all HTTP frameworks
+        "x-api-key": wpeKey,
       },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(8000),
     });
     if (res.ok) {
+      deliveryStatus = `${res.status} OK`;
       logger.info({ projectSlug: args.projectSlug, framework, status: res.status, url: webhookUrl }, "WPE webhook acknowledged");
     } else {
       let body = "";
       try { body = await res.text(); } catch { /* ignore */ }
+      deliveryStatus = `HTTP ${res.status}`;
       logger.warn({ projectSlug: args.projectSlug, status: res.status, body, url: webhookUrl }, "WPE webhook non-200 response");
       console.error(`❌ WPE WEBHOOK NON-200 [${res.status}] for ${args.projectSlug}:`, body);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    deliveryStatus = msg.length > 60 ? msg.slice(0, 60) + "…" : msg;
     console.error(`❌ WPE WEBHOOK DELIVERY FAILED for ${args.projectSlug}:`, msg);
     logger.warn({ err: msg, projectSlug: args.projectSlug, url: webhookUrl }, "WPE webhook delivery failed (non-fatal)");
+  }
+
+  // Persist delivery record for /wpe history audit trail
+  try {
+    await db.insert(wpeWebhookLogsTable).values({
+      projectId:      args.projectSlug,
+      framework,
+      health:         args.health,
+      liveUrl:        args.liveUrl,
+      deliveryStatus,
+    });
+  } catch (dbErr) {
+    logger.warn({ dbErr }, "Failed to persist WPE webhook log (non-fatal)");
   }
 }
 
@@ -1290,6 +1307,45 @@ export function initCoreBot(): void {
       `👤 *User ID:* ${payment.userId}\n` +
       `📝 *Reason:* ${escapeMd(reason)}\n\n` +
       `User has been notified.`,
+      { parse_mode: "Markdown" }
+    );
+  }));
+
+  // ── Admin-only: /wpe history ───────────────────────────────────────────────
+  bot.onText(/\/wpe\s+history/, safeHandler(async (msg) => {
+    if (msg.from!.id !== ADMIN_TELEGRAM_ID) return;
+
+    const rows = await db
+      .select()
+      .from(wpeWebhookLogsTable)
+      .orderBy(desc(wpeWebhookLogsTable.createdAt))
+      .limit(10);
+
+    if (rows.length === 0) {
+      await safeSend(bot!, msg.chat.id,
+        `📭 *WPE Webhook History*\n\nNo delivery records yet — fire a build first.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const statusIcon = (s: string) => s.startsWith("200") ? "🟢" : s.startsWith("HTTP") ? "🟡" : "🔴";
+    const healthBar  = (h: number) => h >= 90 ? "▓▓▓▓▓" : h >= 50 ? "▓▓▓░░" : "▓░░░░";
+
+    const lines = rows.map((r, i) => {
+      const ts = r.createdAt
+        ? r.createdAt.toISOString().replace("T", " ").slice(0, 16) + " UTC"
+        : "unknown";
+      return (
+        `${i + 1}. ${statusIcon(r.deliveryStatus)} \`${r.projectId}\`\n` +
+        `   🔧 ${r.framework}  •  ${healthBar(r.health)} ${r.health}%\n` +
+        `   📡 ${r.deliveryStatus}  •  ${ts}`
+      );
+    });
+
+    await safeSend(bot!, msg.chat.id,
+      `📜 *WPE Webhook Delivery History* (last ${rows.length})\n\n` +
+      lines.join("\n\n"),
       { parse_mode: "Markdown" }
     );
   }));
