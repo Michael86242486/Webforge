@@ -7,12 +7,14 @@ import proxyRouter from "./proxy.js";
 import runtimeRouter from "./runtime.js";
 import authRouter from "./auth.js";
 import nodesRouter from "./nodes.js";
+import ideRouter from "./ide.js";
 
 const router: IRouter = Router();
 
 router.use(authRouter);
 router.use(runtimeRouter);
 router.use(nodesRouter);
+router.use(ideRouter);
 router.use(healthRouter);
 router.use(deployingRouter);
 router.use(projectsRouter);
