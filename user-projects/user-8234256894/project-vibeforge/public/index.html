@@ -6,235 +6,189 @@
     <title>VibeForge | Independent Music Producer</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
+    <link rel="icon" type="image/svg+xml" href="assets/images/logo.svg">
 </head>
 <body>
-    <div class="app-container">
-        <!-- Neon Header -->
-        <header class="neon-header">
-            <div class="header-content">
-                <div class="logo-container">
-                    <h1 class="logo">Vibe<span class="logo-accent">Forge</span></h1>
-                    <p class="tagline">Crafting Beats, Forging Vibes</p>
+    <header class="header">
+        <div class="container">
+            <div class="logo">
+                <img src="assets/images/logo.svg" alt="VibeForge Logo" class="logo-img">
+                <h1 class="logo-text">VibeForge</h1>
+            </div>
+            <nav class="nav">
+                <a href="#" class="nav-link">Home</a>
+                <a href="#" class="nav-link">Tracks</a>
+                <a href="#" class="nav-link">About</a>
+                <a href="#" class="nav-link">Contact</a>
+            </nav>
+            <button id="cartBtn" class="btn btn-primary">
+                <span class="btn-icon">🛒</span>
+                <span class="btn-text">Cart</span>
+                <span id="cartCount" class="btn-badge">0</span>
+            </button>
+        </div>
+    </header>
+
+    <main class="main">
+        <section class="hero">
+            <div class="container">
+                <div class="hero-content">
+                    <h2 class="hero-title">Forging Vibes, One Track at a Time</h2>
+                    <p class="hero-subtitle">Discover the latest beats and melodies from independent producer VibeForge. Dive into a world of sonic innovation.</p>
+                    <div class="hero-cta">
+                        <a href="#" class="btn btn-gradient">Explore Tracks</a>
+                        <a href="#" class="btn btn-outline">Learn More</a>
+                    </div>
                 </div>
-                <nav class="main-nav">
-                    <ul class="nav-links">
-                        <li><a href="#" class="nav-link active" data-section="dashboard">Dashboard</a></li>
-                        <li><a href="#" class="nav-link" data-section="tracks">Tracks</a></li>
-                        <li><a href="#" class="nav-link" data-section="about">About</a></li>
-                        <li><a href="#" class="nav-link" data-section="contact">Contact</a></li>
-                    </ul>
-                </nav>
-                <div class="header-actions">
-                    <button class="btn btn-ghost" id="themeToggle" aria-label="Toggle theme">
-                        <span class="icon">🌙</span>
-                    </button>
-                    <button class="btn btn-primary" id="openCartBtn">
-                        <span class="icon">🛒</span>
-                        <span class="cart-count" id="cartCount">0</span>
-                        Cart
-                    </button>
+                <div class="hero-visual">
+                    <div class="neon-wave"></div>
+                    <div class="neon-wave neon-wave-2"></div>
+                    <div class="neon-wave neon-wave-3"></div>
                 </div>
             </div>
-            <div class="header-glow"></div>
-        </header>
+        </section>
 
-        <!-- Main Content -->
-        <main class="main-content">
-            <!-- Hero Section -->
-            <section class="hero-section">
-                <div class="hero-content glass-card">
-                    <div class="hero-text">
-                        <h2 class="hero-title">Immerse Yourself in <span class="gradient-text">Sonic Artistry</span></h2>
-                        <p class="hero-subtitle">Discover exclusive beats, stems, and samples crafted by VibeForge. Each track is a journey through sound, designed to elevate your next project.</p>
-                        <div class="hero-cta">
-                            <button class="btn btn-neon btn-large" id="exploreTracksBtn">
-                                <span class="btn-text">Explore Tracks</span>
-                                <span class="btn-glow"></span>
-                            </button>
-                            <button class="btn btn-glass btn-large" id="syncGitHubBtn">
-                                <span class="icon">🔄</span>
-                                <span class="btn-text">Sync with GitHub</span>
-                            </button>
-                        </div>
-                    </div>
-                    <div class="hero-visual">
-                        <div class="audio-waveform">
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                            <div class="waveform-bar"></div>
-                        </div>
-                        <div class="now-playing glass-card">
-                            <div class="now-playing-header">
-                                <span class="now-playing-label">Now Playing</span>
-                                <div class="now-playing-controls">
-                                    <button class="player-btn" id="prevTrackBtn" aria-label="Previous track">⏮</button>
-                                    <button class="player-btn play-pause-btn" id="playPauseBtn" aria-label="Play/Pause">▶</button>
-                                    <button class="player-btn" id="nextTrackBtn" aria-label="Next track">⏭</button>
-                                </div>
-                            </div>
-                            <div class="now-playing-info">
-                                <div class="track-artwork">
-                                    <div class="artwork-placeholder"></div>
-                                </div>
-                                <div class="track-meta">
-                                    <h3 class="track-title" id="nowPlayingTitle">Select a Track</h3>
-                                    <p class="track-artist" id="nowPlayingArtist">VibeForge</p>
-                                    <div class="progress-container">
-                                        <div class="progress-bar" id="progressBar">
-                                            <div class="progress-fill" id="progressFill"></div>
-                                        </div>
-                                        <div class="time-display">
-                                            <span id="currentTime">0:00</span>
-                                            <span id="duration">0:00</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="volume-control">
-                                <span class="icon">🔊</span>
-                                <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="0.7">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Tracks Grid -->
-            <section class="tracks-section">
-                <div class="section-header">
-                    <h2 class="section-title">Featured <span class="gradient-text">Tracks</span></h2>
-                    <div class="section-actions">
-                        <select class="filter-select" id="genreFilter">
-                            <option value="all">All Genres</option>
-                            <option value="hiphop">Hip Hop</option>
-                            <option value="electronic">Electronic</option>
-                            <option value="chill">Chill</option>
-                            <option value="trap">Trap</option>
-                        </select>
-                        <div class="search-box">
-                            <span class="icon">🔍</span>
-                            <input type="text" id="trackSearch" placeholder="Search tracks...">
-                        </div>
-                    </div>
-                </div>
-                <div class="tracks-grid" id="tracksGrid">
+        <section class="featured">
+            <div class="container">
+                <h2 class="section-title">Featured Tracks</h2>
+                <div class="track-grid" id="trackGrid">
                     <!-- Track cards will be dynamically inserted here -->
                 </div>
-            </section>
-        </main>
+            </div>
+        </section>
 
-        <!-- Cart Modal -->
-        <div class="modal-overlay" id="cartModalOverlay">
-            <div class="modal glass-card" id="cartModal">
-                <div class="modal-header">
-                    <h2 class="modal-title">Your Cart</h2>
-                    <button class="modal-close" id="closeCartModal" aria-label="Close modal">✕</button>
+        <section class="about">
+            <div class="container">
+                <div class="about-content">
+                    <h2 class="section-title">About VibeForge</h2>
+                    <p class="about-text">
+                        VibeForge is the creative alias of a passionate music producer dedicated to crafting unique, genre-blending tracks.
+                        With a background in electronic, hip-hop, and ambient music, VibeForge pushes the boundaries of sound design
+                        and melody to create immersive audio experiences.
+                    </p>
+                    <p class="about-text">
+                        All tracks are produced, mixed, and mastered in-house, ensuring the highest quality and originality.
+                        Whether you're a filmmaker, game developer, or just a music lover, VibeForge has the perfect soundtrack for your project.
+                    </p>
                 </div>
-                <div class="modal-body">
-                    <div class="cart-items" id="cartItems">
-                        <!-- Cart items will be dynamically inserted here -->
-                        <div class="empty-cart-message">
-                            <span class="icon">🛒</span>
-                            <p>Your cart is empty</p>
-                            <p class="empty-cart-sub">Add some tracks to get started!</p>
-                        </div>
+                <div class="about-visual">
+                    <div class="glass-card">
+                        <div class="card-icon">🎧</div>
+                        <h3 class="card-title">Custom Production</h3>
+                        <p class="card-text">Tailored tracks for your unique needs.</p>
                     </div>
-                </div>
-                <div class="modal-footer">
-                    <div class="cart-summary">
-                        <div class="summary-row">
-                            <span>Subtotal</span>
-                            <span id="cartSubtotal">$0.00</span>
-                        </div>
-                        <div class="summary-row">
-                            <span>Tax (8%)</span>
-                            <span id="cartTax">$0.00</span>
-                        </div>
-                        <div class="summary-row total">
-                            <span>Total</span>
-                            <span id="cartTotal">$0.00</span>
-                        </div>
+                    <div class="glass-card">
+                        <div class="card-icon">🔥</div>
+                        <h3 class="card-title">Royalty-Free</h3>
+                        <p class="card-text">Use in commercial projects without worry.</p>
                     </div>
-                    <div class="cart-actions">
-                        <button class="btn btn-ghost" id="clearCartBtn">Clear Cart</button>
-                        <button class="btn btn-neon" id="checkoutBtn">
-                            <span class="btn-text">Proceed to Checkout</span>
-                            <span class="btn-glow"></span>
-                        </button>
+                    <div class="glass-card">
+                        <div class="card-icon">⚡</div>
+                        <h3 class="card-title">Fast Delivery</h3>
+                        <p class="card-text">Get your tracks delivered in record time.</p>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
+    </main>
 
-        <!-- GitHub Sync Notification -->
-        <div class="notification-toast" id="githubSyncToast">
-            <div class="toast-content">
-                <span class="toast-icon">🔄</span>
-                <span class="toast-message" id="toastMessage">Syncing with GitHub...</span>
+    <div class="audio-player-bar" id="audioPlayerBar">
+        <div class="container">
+            <div class="player-container">
+                <div class="player-info">
+                    <img src="assets/images/logo.svg" alt="Now Playing" class="player-thumb">
+                    <div class="player-meta">
+                        <span class="player-title" id="playerTitle">Select a track to play</span>
+                        <span class="player-artist" id="playerArtist">VibeForge</span>
+                    </div>
+                </div>
+                <div class="player-controls">
+                    <button id="prevBtn" class="player-btn" title="Previous">⏮</button>
+                    <button id="playPauseBtn" class="player-btn player-btn-main" title="Play/Pause">▶</button>
+                    <button id="nextBtn" class="player-btn" title="Next">⏭</button>
+                </div>
+                <div class="player-progress">
+                    <span id="currentTime" class="player-time">0:00</span>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                        <input type="range" id="progressSlider" class="progress-slider" min="0" max="100" value="0">
+                    </div>
+                    <span id="duration" class="player-time">0:00</span>
+                </div>
+                <div class="player-volume">
+                    <button id="muteBtn" class="player-btn" title="Mute">🔊</button>
+                    <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.01" value="0.7">
+                </div>
             </div>
-            <div class="toast-progress" id="toastProgress"></div>
         </div>
-
-        <!-- Audio Player (Hidden, controlled via JS) -->
-        <audio id="audioPlayer" preload="auto"></audio>
     </div>
 
-    <footer class="app-footer">
-        <div class="footer-content">
-            <div class="footer-brand">
-                <h3 class="footer-logo">VibeForge</h3>
-                <p class="footer-tagline">Where Music Meets Innovation</p>
+    <div class="modal" id="cartModal">
+        <div class="modal-overlay"></div>
+        <div class="modal-content glass-card">
+            <div class="modal-header">
+                <h2 class="modal-title">Your Cart</h2>
+                <button id="closeCartBtn" class="modal-close">&times;</button>
             </div>
-            <div class="footer-links">
-                <div class="footer-column">
-                    <h4>Explore</h4>
-                    <ul>
-                        <li><a href="#">Tracks</a></li>
-                        <li><a href="#">Licensing</a></li>
-                        <li><a href="#">Collaborations</a></li>
-                    </ul>
+            <div class="modal-body" id="cartItems">
+                <!-- Cart items will be dynamically inserted here -->
+                <div class="cart-empty">
+                    <span class="cart-empty-icon">🛒</span>
+                    <p>Your cart is empty</p>
                 </div>
-                <div class="footer-column">
-                    <h4>Support</h4>
-                    <ul>
-                        <li><a href="#">FAQ</a></li>
-                        <li><a href="#">Contact</a></li>
-                        <li><a href="#">GitHub</a></li>
-                    </ul>
+            </div>
+            <div class="modal-footer">
+                <div class="cart-total">
+                    <span>Total:</span>
+                    <span id="cartTotal">$0.00</span>
                 </div>
-                <div class="footer-column">
-                    <h4>Legal</h4>
-                    <ul>
-                        <li><a href="#">Privacy Policy</a></li>
-                        <li><a href="#">Terms of Service</a></li>
-                        <li><a href="#">Cookie Policy</a></li>
-                    </ul>
-                </div>
+                <button id="checkoutBtn" class="btn btn-gradient btn-block">Checkout</button>
             </div>
         </div>
-        <div class="footer-bottom">
-            <p>&copy; 2026 VibeForge. All rights reserved.</p>
-            <div class="social-links">
-                <a href="#" aria-label="Twitter"><span class="icon">🐦</span></a>
-                <a href="#" aria-label="Instagram"><span class="icon">📷</span></a>
-                <a href="#" aria-label="SoundCloud"><span class="icon">🎧</span></a>
-                <a href="#" aria-label="GitHub"><span class="icon">💻</span></a>
+    </div>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-brand">
+                    <img src="assets/images/logo.svg" alt="VibeForge Logo" class="footer-logo">
+                    <p class="footer-tagline">Crafting sonic experiences for the modern creator.</p>
+                </div>
+                <div class="footer-links">
+                    <div class="footer-col">
+                        <h3 class="footer-col-title">Quick Links</h3>
+                        <a href="#" class="footer-link">Home</a>
+                        <a href="#" class="footer-link">Tracks</a>
+                        <a href="#" class="footer-link">About</a>
+                        <a href="#" class="footer-link">Contact</a>
+                    </div>
+                    <div class="footer-col">
+                        <h3 class="footer-col-title">Legal</h3>
+                        <a href="#" class="footer-link">Licenses</a>
+                        <a href="#" class="footer-link">Privacy Policy</a>
+                        <a href="#" class="footer-link">Terms of Service</a>
+                    </div>
+                    <div class="footer-col">
+                        <h3 class="footer-col-title">Connect</h3>
+                        <a href="#" class="footer-link">GitHub</a>
+                        <a href="#" class="footer-link">Twitter</a>
+                        <a href="#" class="footer-link">Instagram</a>
+                        <a href="#" class="footer-link">SoundCloud</a>
+                    </div>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2026 VibeForge. All rights reserved.</p>
             </div>
         </div>
     </footer>
-    </div>
 
-    <script src="utils/api.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/audioPlayer.js"></script>
+    <script src="js/cart.js"></script>
+    <script src="js/githubSync.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

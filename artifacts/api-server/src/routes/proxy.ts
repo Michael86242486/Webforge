@@ -5,6 +5,10 @@ import httpProxy from "http-proxy";
 import { db, projectsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
+import fs from "fs/promises";
+import path from "path";
+import { createReadStream, statSync } from "fs";
+import mime from "mime-types";
 
 const router = Router();
 
@@ -14,43 +18,11 @@ proxy.on("error", (err, req, res) => {
   logger.error({ err, url: req.url }, "proxy error");
   const expressRes = res as Response;
   if (!expressRes.headersSent) {
-    const rawUrl = req.url ?? "";
-    const acceptHeader = (req.headers?.accept as string) ?? "";
-    const isApiRequest = rawUrl.includes("/api/") || acceptHeader.includes("application/json");
-    if (isApiRequest) {
-      expressRes.status(200).json({
-        success: false,
-        status: "CRASHED",
-        error: "Sandbox runtime unavailable — app may be starting or crashed",
-        ts: new Date().toISOString(),
-      });
-    } else {
-      expressRes.status(502).send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"/><meta http-equiv="refresh" content="3"/>
-<title>Connecting...</title>
-<style>body{font-family:-apple-system,sans-serif;background:#0a0e14;color:#cdd9e5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:10px;}
-.s{width:28px;height:28px;border:3px solid #1e2d45;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg)}}
-p{color:#6e7f96;font-size:14px;text-align:center;max-width:300px}
-small{color:#3e4f63;font-size:11px;margin-top:8px}</style>
-</head><body>
-<div class="s"></div>
-<p>Connecting to your app...</p>
-<small>Auto-refreshing every 3 seconds</small>
-</body></html>`);
-    }
+    expressRes.status(502).send(busyHtml("App proxy error — it may have crashed. Static fallback should have caught this."));
   }
 });
 
 // ─── Unified URL Rewriting (HTML + CSS) ───────────────────────────────────────
-// Intercepts HTML and CSS responses. Rewrites absolute paths so assets load
-// correctly when the app is served through the path-based proxy.
-//
-// HTML: injects <base href="..."> + rewrites href/src/action="/..." attributes
-//       and url('/...') inside inline <style> blocks
-// CSS:  rewrites url('/...') and url("/...") in external CSS files
-//       @import '/...' → @import '${prefix}/...'
-
 proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: ServerResponse) => {
   const contentType = (proxyRes.headers["content-type"] ?? "").toLowerCase();
   const isHtml = contentType.includes("text/html");
@@ -61,7 +33,6 @@ proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: Serv
   const projectKey = (req as Request & { __projectKey?: string }).__projectKey;
   if (!projectKey) return;
 
-  // Guard against double-handling
   if ((res as ServerResponse & { __wfHandled?: boolean }).__wfHandled) return;
   (res as ServerResponse & { __wfHandled?: boolean }).__wfHandled = true;
 
@@ -72,48 +43,12 @@ proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: Serv
     const prefix = `/api/preview-proxy/${projectKey}`;
 
     if (isHtml) {
-      // Inject <base> tag so all relative paths resolve through the proxy prefix
-      if (!body.match(/<base\s/i)) {
-        if (body.match(/<head[^>]*>/i)) {
-          body = body.replace(/(<head[^>]*>)/i, `$1<base href="${prefix}/">`);
-        } else {
-          body = `<base href="${prefix}/">\n` + body;
-        }
-      }
-
-      // Rewrite remaining absolute paths in HTML attributes
-      const prefixEscaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      body = body
-        // href="/path" src="/path" action="/path" → proxy-prefixed
-        .replace(
-          new RegExp(`(href|src|action|data-src)="\/(?!\/${prefixEscaped.slice(1)}|\/|api\/)`, "g"),
-          `$1="${prefix}/`
-        )
-        // url('/path') url("/path") url(/path) inside inline <style>
-        .replace(/url\(['"]?\/(?!\/|api\/preview-proxy\/)/g, `url('${prefix}/`);
-
-      // Rewrite srcset="/path" (used by <img srcset>)
-      body = body.replace(/srcset="([^"]+)"/g, (_match, srcset: string) => {
-        const fixed = srcset.replace(/(?:^|,\s*)(\/)(?!\/|api\/preview-proxy\/)/g, ` ${prefix}/`);
-        return `srcset="${fixed}"`;
-      });
-
+      body = rewriteHtml(body, prefix);
     } else if (isCss) {
-      // Rewrite url('/path') url("/path") url(/path) in external CSS files
-      body = body
-        .replace(/url\(\s*'\/(?!\/|api\/preview-proxy\/)/g, `url('${prefix}/`)
-        .replace(/url\(\s*"\/(?!\/|api\/preview-proxy\/)/g, `url("${prefix}/`)
-        .replace(/url\(\s*\/(?![\/']|api\/preview-proxy\/)/g, `url(${prefix}/`);
-
-      // Rewrite @import '/path' and @import "/path"
-      body = body
-        .replace(/@import\s+'\/(?!\/|api\/preview-proxy\/)/g, `@import '${prefix}/`)
-        .replace(/@import\s+"\/(?!\/|api\/preview-proxy\/)/g, `@import "${prefix}/`);
+      body = rewriteCss(body, prefix);
     }
 
     const buf = Buffer.from(body, "utf8");
-
-    // Build clean headers — strip transfer-encoding (we're sending a fixed-length buffer)
     const headers: Record<string, string | string[] | undefined> = {};
     for (const [k, v] of Object.entries(proxyRes.headers)) {
       const lower = k.toLowerCase();
@@ -136,8 +71,161 @@ proxy.on("proxyRes", (proxyRes: IncomingMessage, req: IncomingMessage, res: Serv
   });
 });
 
-// ─── Project Lookup (by slug or numeric ID) ────────────────────────────────────
+// ─── HTML Rewriter ─────────────────────────────────────────────────────────────
+function rewriteHtml(body: string, prefix: string): string {
+  if (!body.match(/<base\s/i)) {
+    if (body.match(/<head[^>]*>/i)) {
+      body = body.replace(/(<head[^>]*>)/i, `$1<base href="${prefix}/">`);
+    } else {
+      body = `<base href="${prefix}/">\n` + body;
+    }
+  }
+  const prefixEscaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  body = body
+    .replace(
+      new RegExp(`(href|src|action|data-src)="\/(?!\/${prefixEscaped.slice(1)}|\/|api\/)`, "g"),
+      `$1="${prefix}/`
+    )
+    .replace(/url\(['"]?\/(?!\/|api\/preview-proxy\/)/g, `url('${prefix}/`);
+  body = body.replace(/srcset="([^"]+)"/g, (_match, srcset: string) => {
+    const fixed = srcset.replace(/(?:^|,\s*)(\/)(?!\/|api\/preview-proxy\/)/g, ` ${prefix}/`);
+    return `srcset="${fixed}"`;
+  });
+  return body;
+}
 
+// ─── CSS Rewriter ──────────────────────────────────────────────────────────────
+function rewriteCss(body: string, prefix: string): string {
+  return body
+    .replace(/url\(\s*'\/(?!\/|api\/preview-proxy\/)/g, `url('${prefix}/`)
+    .replace(/url\(\s*"\/(?!\/|api\/preview-proxy\/)/g, `url("${prefix}/`)
+    .replace(/url\(\s*\/(?![\/']|api\/preview-proxy\/)/g, `url(${prefix}/`)
+    .replace(/@import\s+'\/(?!\/|api\/preview-proxy\/)/g, `@import '${prefix}/`)
+    .replace(/@import\s+"\/(?!\/|api\/preview-proxy\/)/g, `@import "${prefix}/`);
+}
+
+// ─── Port Health Check ─────────────────────────────────────────────────────────
+async function isPortAlive(port: number): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 600);
+    await fetch(`http://127.0.0.1:${port}/`, { signal: ctrl.signal, method: "HEAD" });
+    clearTimeout(timer);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ─── Static File Fallback ──────────────────────────────────────────────────────
+// When the spawned app isn't running, serve built/static assets directly from disk.
+// Priority order: public/ → dist/ → build/ → workDir root
+
+const STATIC_CANDIDATES = ["public", "dist", "build", "out", "."];
+
+async function findStaticDir(workDir: string): Promise<string | null> {
+  for (const candidate of STATIC_CANDIDATES) {
+    const dir = candidate === "." ? workDir : path.join(workDir, candidate);
+    try {
+      const indexPath = path.join(dir, "index.html");
+      await fs.access(indexPath);
+      return dir;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function busyHtml(msg = "App is starting up..."): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"/><meta http-equiv="refresh" content="4"/>
+<title>WebForge — Loading</title>
+<style>
+  body{font-family:-apple-system,sans-serif;background:#0a0e14;color:#cdd9e5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;}
+  .s{width:32px;height:32px;border:3px solid #1e2d45;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  h3{color:#58a6ff;margin:0;font-size:16px;}
+  p{color:#6e7f96;font-size:13px;text-align:center;max-width:300px;margin:0}
+  small{color:#3e4f63;font-size:11px;margin-top:4px}
+</style></head>
+<body>
+  <div class="s"></div>
+  <h3>WebForge</h3>
+  <p>${msg}</p>
+  <small>Auto-refreshing every 4 seconds</small>
+</body></html>`;
+}
+
+async function serveStaticFallback(
+  req: Request,
+  res: Response,
+  workDir: string,
+  projectKey: string
+): Promise<boolean> {
+  const staticDir = await findStaticDir(workDir);
+  if (!staticDir) return false;
+
+  // req.originalUrl has the full path (e.g. /api/preview-proxy/vibeforge/css/style.css)
+  // req.url has /api/ stripped by Express (e.g. /preview-proxy/vibeforge/css/style.css)
+  // Use originalUrl to strip the correct prefix including /api/
+  const rawUrl = (req.originalUrl ?? req.url).split("?")[0];
+  const proxyPrefix = `/api/preview-proxy/${projectKey}`;
+  const stripped = rawUrl.startsWith(proxyPrefix)
+    ? rawUrl.slice(proxyPrefix.length) || "/"
+    : "/";
+
+  // Sanitize: resolve within staticDir, prevent path traversal
+  const relative = stripped === "/" || stripped === "" ? "index.html" : stripped.replace(/^\/+/, "");
+  const filePath = path.resolve(staticDir, relative);
+
+  if (!filePath.startsWith(path.resolve(staticDir))) {
+    res.status(403).send("Forbidden");
+    return true;
+  }
+
+  // Try the file, then fall back to index.html (SPA behaviour)
+  let targetPath = filePath;
+  try {
+    const stat = await fs.stat(targetPath);
+    if (stat.isDirectory()) {
+      targetPath = path.join(targetPath, "index.html");
+      await fs.access(targetPath);
+    }
+  } catch {
+    // Not found — fall back to index.html for client-side routing
+    targetPath = path.join(staticDir, "index.html");
+    try { await fs.access(targetPath); } catch { return false; }
+  }
+
+  const mimeType = mime.lookup(targetPath) || "application/octet-stream";
+  const isHtml = mimeType.includes("text/html");
+  const isCss = mimeType.includes("text/css");
+
+  try {
+    let content = await fs.readFile(targetPath);
+    const prefix = `/api/preview-proxy/${projectKey}`;
+
+    if (isHtml) {
+      let text = rewriteHtml(content.toString("utf8"), prefix);
+      content = Buffer.from(text, "utf8");
+    } else if (isCss) {
+      let text = rewriteCss(content.toString("utf8"), prefix);
+      content = Buffer.from(text, "utf8");
+    }
+
+    res.setHeader("Content-Type", mimeType + (isHtml || isCss ? "; charset=utf-8" : ""));
+    res.setHeader("Content-Length", content.length);
+    res.setHeader("Cache-Control", "no-cache");
+    res.status(200).send(content);
+    return true;
+  } catch (err) {
+    logger.error({ err, targetPath }, "Static fallback read error");
+    return false;
+  }
+}
+
+// ─── Project Lookup ────────────────────────────────────────────────────────────
 async function lookupProject(projectKey: string) {
   const asNumber = Number(projectKey);
   if (!isNaN(asNumber) && String(asNumber) === projectKey) {
@@ -149,7 +237,6 @@ async function lookupProject(projectKey: string) {
 }
 
 // ─── Health Endpoint ──────────────────────────────────────────────────────────
-
 router.get("/projects/:projectKey/health", async (req: Request, res: Response) => {
   const project = await lookupProject(req.params.projectKey);
   if (!project?.port) {
@@ -168,40 +255,6 @@ router.get("/projects/:projectKey/health", async (req: Request, res: Response) =
 });
 
 // ─── Preview Proxy Handler ────────────────────────────────────────────────────
-// Two routes share one handler:
-//   /preview-proxy/:projectKey        → root path
-//   /preview-proxy/:projectKey/*path  → all sub-paths
-
-const startingHtml = (projectKey: string) => `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<meta http-equiv="refresh" content="5"/>
-<title>WebForge — Starting App...</title>
-<style>
-  body { font-family: -apple-system, sans-serif; background: #0a0e14; color: #cdd9e5; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; flex-direction: column; gap: 12px; }
-  .spinner { width: 32px; height: 32px; border: 3px solid #1e2d45; border-top-color: #58a6ff; border-radius: 50%; animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  h2 { color: #58a6ff; margin: 0; font-size: 18px; }
-  p { color: #6e7f96; margin: 0; font-size: 13px; text-align: center; }
-</style>
-</head>
-<body>
-  <div class="spinner"></div>
-  <h2>Starting your app...</h2>
-  <p><strong>${projectKey}</strong> is spinning up.<br/>This page will refresh automatically.</p>
-  <script>
-    (function poll() {
-      fetch('/api/projects/${projectKey}/health')
-        .then(r => r.json())
-        .then(d => { if (d.live) window.location.reload(); else setTimeout(poll, 2500); })
-        .catch(() => setTimeout(poll, 3000));
-    })();
-  </script>
-</body>
-</html>`;
-
 const proxyHandler: RequestHandler = async (req: Request, res: Response, _next: NextFunction) => {
   const { projectKey } = req.params;
 
@@ -215,18 +268,31 @@ const proxyHandler: RequestHandler = async (req: Request, res: Response, _next: 
     return;
   }
 
-  if (!project.port) {
-    res.status(503).send(startingHtml(project.slug ?? String(project.id)));
+  // ── Static fallback path (no port or port dead) ───────────────────────────
+  const portDead = !project.port || !(await isPortAlive(project.port));
+
+  if (portDead) {
+    const workDir = project.workDir;
+    if (workDir) {
+      const served = await serveStaticFallback(req, res, workDir, projectKey);
+      if (served) return;
+    }
+    // Nothing to serve — show a loading page
+    res.status(503).send(busyHtml(`<strong>${project.name}</strong> isn't running right now.<br/>Rebuild it from Telegram to bring it back online.`));
     return;
   }
 
-  const targetPort = project.port;
-  const prefix = `/preview-proxy/${projectKey}`;
+  // ── Live proxy to running port ────────────────────────────────────────────
+  const targetPort = project.port!;
 
-  // Store projectKey on req so the proxyRes HTML/CSS-rewrite handler can access it
   (req as Request & { __projectKey?: string }).__projectKey = projectKey;
 
-  req.url = req.url.replace(prefix, "") || "/";
+  // req.url here = /preview-proxy/{key}/... (Express already stripped /api/)
+  // Strip /preview-proxy/{key} so the upstream app sees a clean path
+  const routePrefix = `/preview-proxy/${projectKey}`;
+  if (req.url.startsWith(routePrefix)) {
+    req.url = req.url.slice(routePrefix.length) || "/";
+  }
 
   proxy.web(req, res, { target: `http://127.0.0.1:${targetPort}` });
 };
