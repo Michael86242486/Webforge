@@ -7,7 +7,8 @@ import {
 import { encrypt, decrypt } from "../utils/crypto.js";
 import { recordTelemetry } from "../utils/telemetry.js";
 import { safeSend, sendTyping, safeDelete, escapeMd } from "../utils/telegram.js";
-import { db, usersTable, projectsTable, paymentsTable, wpeWebhookLogsTable } from "@workspace/db";
+import { db, usersTable, projectsTable, paymentsTable, wpeWebhookLogsTable, webUsersTable } from "@workspace/db";
+import bcrypt from "bcryptjs";
 import { eq, desc } from "drizzle-orm";
 import {
   ensureProjectDir, scaffoldBotProject, spawnBotProcess,
@@ -167,6 +168,17 @@ async function extractProjectName(description: string, telegramId: number): Prom
 const activeSessions = new Map<number, number>();
 const gitPendingPush = new Map<number, { workDir: string; projectId: number }>();
 
+// ─── Pending Auth Conversations ───────────────────────────────────────────────
+
+interface AuthState {
+  step: "email" | "username" | "password" | "link_email" | "link_password";
+  email?: string;
+  username?: string;
+  telegramId: number;
+}
+const pendingAuth = new Map<number, AuthState>(); // key: chatId
+
+// ─── Pending Naming ────────────────────────────────────────────────────────────
 // Pending naming: user must reply with a project name before build starts
 const pendingNaming = new Map<number, {
   chatId: number;
@@ -531,15 +543,46 @@ async function runFullBuild(
 
 async function handleStart(msg: TelegramBot.Message): Promise<void> {
   if (!bot) return;
-  if (!await isSubscribed(msg.from!.id)) { await sendGate(msg.chat.id); return; }
-  const user = await getOrCreateUser(msg.from!.id, msg.from?.first_name, msg.from?.username);
+  const chatId = msg.chat.id;
+  const telegramId = msg.from!.id;
+
+  if (!await isSubscribed(telegramId)) { await sendGate(chatId); return; }
+
+  const user = await getOrCreateUser(telegramId, msg.from?.first_name, msg.from?.username);
   const tier = user.tier as Tier;
   const left = TIER_LIMITS[tier].dailyActions - user.dailyActionsCounter;
 
-  await safeSend(bot, msg.chat.id,
-    `⚡ *Welcome to WebForge!*\n\nI'm your autonomous full-stack co-founder. Tell me what to build — I'll plan it, confirm with you, then code and deploy it live.\n\n*Plan:* ${tier.toUpperCase()} | *Actions left today:* ${left}/${TIER_LIMITS[tier].dailyActions}\n\n*Try saying:*\n🏗 "Build a Coca-Cola promo website"\n🎨 "Create an image of a Lagos sunset"\n🤖 "Make a task manager with dark mode"\n🐙 /link\\_github — connect GitHub\n\nType /help for all commands.`,
-    { parse_mode: "Markdown" }
-  );
+  // Check for linked web account
+  const webRows = await db.select().from(webUsersTable)
+    .where(eq(webUsersTable.telegramId, telegramId)).limit(1);
+  const webUser = webRows[0];
+  const platformUrl = PLATFORM_URL ?? "https://webforge.replit.app";
+
+  if (webUser) {
+    await safeSend(bot, chatId,
+      `⚡ *Welcome back, ${escapeMd(msg.from?.first_name ?? "Builder")}!*\n\n` +
+      `👤 *Dashboard Account:* ${escapeMd(webUser.username)}\n` +
+      `📧 *Email:* ${escapeMd(webUser.email)}\n` +
+      `🏷️ *Plan:* ${tier.toUpperCase()} | *Actions left:* ${left}/${TIER_LIMITS[tier].dailyActions}\n\n` +
+      `Tell me what to build, or use the menu below:`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+        [{ text: "🌐 Open Dashboard", url: platformUrl }],
+        [{ text: "📋 My Projects", callback_data: "bot_projects" }, { text: "📊 Status", callback_data: "bot_status" }],
+      ]}}
+    );
+  } else {
+    await safeSend(bot, chatId,
+      `⚡ *Welcome to WebForge!*\n\n` +
+      `I'm your autonomous full-stack co-founder. I'll plan, code, and deploy apps from your text instructions.\n\n` +
+      `*Plan:* ${tier.toUpperCase()} | *Actions left today:* ${left}/${TIER_LIMITS[tier].dailyActions}\n\n` +
+      `📌 *Set up your WebForge account* so your projects are always tied to your identity and accessible from the web dashboard:`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+        [{ text: "🆕 Create Web Account", callback_data: "auth_create" }],
+        [{ text: "🔗 Link Existing Account", callback_data: "auth_link" }],
+        [{ text: "⚡ Skip for now", callback_data: "auth_skip" }],
+      ]}}
+    );
+  }
 }
 
 async function handleHelp(msg: TelegramBot.Message): Promise<void> {
@@ -1512,8 +1555,27 @@ export function initCoreBot(): void {
       if (data === "check_subscription") {
         const ok = await isSubscribed(telegramId);
         if (ok) {
-          await getOrCreateUser(telegramId, query.from.first_name, query.from.username);
-          await safeSend(bot, chatId, "✅ *Verified!* Welcome to WebForge 🔥 Tell me what to build.", { parse_mode: "Markdown" });
+          const user = await getOrCreateUser(telegramId, query.from.first_name, query.from.username);
+          const webRows = await db.select().from(webUsersTable)
+            .where(eq(webUsersTable.telegramId, telegramId)).limit(1);
+          const webUser = webRows[0];
+          if (webUser) {
+            await safeSend(bot, chatId,
+              `✅ *Verified!* Welcome back, ${escapeMd(query.from.first_name ?? "Builder")} 🔥\n\n👤 Account: ${escapeMd(webUser.username)}\n\nTell me what to build!`,
+              { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+                [{ text: "🌐 Open Dashboard", url: PLATFORM_URL ?? "https://webforge.replit.app" }],
+              ]}}
+            );
+          } else {
+            await safeSend(bot, chatId,
+              `✅ *Verified!* Welcome to WebForge 🔥\n\nSet up your account to access the web dashboard:`,
+              { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+                [{ text: "🆕 Create Web Account", callback_data: "auth_create" }],
+                [{ text: "🔗 Link Existing Account", callback_data: "auth_link" }],
+                [{ text: "⚡ Skip for now", callback_data: "auth_skip" }],
+              ]}}
+            );
+          }
         } else {
           await safeSend(bot, chatId, `❌ Not joined yet — join ${REQUIRED_CHANNEL} first.`,
             { reply_markup: { inline_keyboard: [[
@@ -1522,6 +1584,50 @@ export function initCoreBot(): void {
             ]] } }
           );
         }
+        return;
+      }
+
+      // ── Auth: Create new web account ───────────────────────────────────────
+      if (data === "auth_create") {
+        pendingAuth.set(chatId, { step: "email", telegramId });
+        await safeSend(bot, chatId,
+          `🆕 *Create your WebForge account*\n\nStep 1/3 — Enter your *email address*:`,
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      // ── Auth: Link existing web account ────────────────────────────────────
+      if (data === "auth_link") {
+        pendingAuth.set(chatId, { step: "link_email", telegramId });
+        await safeSend(bot, chatId,
+          `🔗 *Link your WebForge account*\n\nEnter the *email* associated with your existing account:`,
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      // ── Auth: Skip account setup ────────────────────────────────────────────
+      if (data === "auth_skip") {
+        pendingAuth.delete(chatId);
+        await safeSend(bot, chatId,
+          `⚡ *Let's build!*\n\nDescribe what you want to create and I'll get started.\n\n_"Build me a restaurant booking site"_\n_"Create a SaaS dashboard with dark mode"_`,
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      // ── Bot shortcut: Projects list ─────────────────────────────────────────
+      if (data === "bot_projects") {
+        const fakeMsg = { ...query.message, from: query.from } as TelegramBot.Message;
+        await handleProjects(fakeMsg);
+        return;
+      }
+
+      // ── Bot shortcut: Status ─────────────────────────────────────────────────
+      if (data === "bot_status") {
+        const fakeMsg = { ...query.message, from: query.from } as TelegramBot.Message;
+        await handleStatus(fakeMsg);
         return;
       }
 
@@ -1592,6 +1698,142 @@ export function initCoreBot(): void {
   // ── Messages ──────────────────────────────────────────────────────────────
   bot.on("message", async (msg) => {
     if (!msg.text || msg.text.startsWith("/")) return;
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+
+    // ── Auth conversation flow ───────────────────────────────────────────────
+    const authState = pendingAuth.get(chatId);
+    if (authState) {
+      try {
+        // ── Create account flow ──────────────────────────────────────────────
+        if (authState.step === "email") {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
+            await safeSend(bot, chatId, "❌ Invalid email. Please enter a valid email address:");
+            return;
+          }
+          // Check for duplicate email
+          const existing = await db.select({ id: webUsersTable.id })
+            .from(webUsersTable).where(eq(webUsersTable.email, text.toLowerCase())).limit(1);
+          if (existing.length) {
+            await safeSend(bot, chatId,
+              `❌ That email is already registered.\n\nUse *Link Existing Account* instead, or enter a different email:`,
+              { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+                [{ text: "🔗 Link Existing Account", callback_data: "auth_link" }],
+              ]}}
+            );
+            return;
+          }
+          authState.email = text.toLowerCase();
+          authState.step = "username";
+          pendingAuth.set(chatId, authState);
+          await safeSend(bot, chatId,
+            `✅ Email saved.\n\nStep 2/3 — Choose a *username* (letters, numbers, underscores only):`,
+            { parse_mode: "Markdown" }
+          );
+          return;
+        }
+
+        if (authState.step === "username") {
+          if (!/^[a-zA-Z0-9_]{3,20}$/.test(text)) {
+            await safeSend(bot, chatId,
+              "❌ Username must be 3-20 characters, letters/numbers/underscores only. Try again:"
+            );
+            return;
+          }
+          const existingUser = await db.select({ id: webUsersTable.id })
+            .from(webUsersTable).where(eq(webUsersTable.username, text)).limit(1);
+          if (existingUser.length) {
+            await safeSend(bot, chatId, "❌ That username is taken. Choose another:");
+            return;
+          }
+          authState.username = text;
+          authState.step = "password";
+          pendingAuth.set(chatId, authState);
+          await safeSend(bot, chatId,
+            `✅ Username saved.\n\nStep 3/3 — Set a *password* (min. 8 characters):`,
+            { parse_mode: "Markdown" }
+          );
+          return;
+        }
+
+        if (authState.step === "password") {
+          if (text.length < 8) {
+            await safeSend(bot, chatId, "❌ Password must be at least 8 characters. Try again:");
+            return;
+          }
+          const passwordHash = await bcrypt.hash(text, 10);
+          const [newUser] = await db.insert(webUsersTable).values({
+            email: authState.email!,
+            username: authState.username!,
+            passwordHash,
+            telegramId: authState.telegramId,
+          }).returning();
+          pendingAuth.delete(chatId);
+          await safeSend(bot, chatId,
+            `🎉 *Account created!*\n\n👤 Username: ${escapeMd(newUser.username)}\n📧 Email: ${escapeMd(newUser.email)}\n\nYou can now log in to the WebForge dashboard with your email and password.`,
+            { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+              [{ text: "🌐 Open Dashboard", url: PLATFORM_URL ?? "https://webforge.replit.app" }],
+              [{ text: "⚡ Start Building", callback_data: "auth_skip" }],
+            ]}}
+          );
+          return;
+        }
+
+        // ── Link existing account flow ───────────────────────────────────────
+        if (authState.step === "link_email") {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
+            await safeSend(bot, chatId, "❌ Invalid email. Please enter your registered email:");
+            return;
+          }
+          const rows = await db.select().from(webUsersTable)
+            .where(eq(webUsersTable.email, text.toLowerCase())).limit(1);
+          if (!rows.length) {
+            await safeSend(bot, chatId,
+              `❌ No account found with that email. Want to create one instead?`,
+              { reply_markup: { inline_keyboard: [
+                [{ text: "🆕 Create Account", callback_data: "auth_create" }],
+              ]}}
+            );
+            return;
+          }
+          authState.email = text.toLowerCase();
+          authState.step = "link_password";
+          pendingAuth.set(chatId, authState);
+          await safeSend(bot, chatId, "🔑 Enter your *password* to confirm:}", { parse_mode: "Markdown" });
+          return;
+        }
+
+        if (authState.step === "link_password") {
+          const rows = await db.select().from(webUsersTable)
+            .where(eq(webUsersTable.email, authState.email!)).limit(1);
+          const webUser = rows[0];
+          if (!webUser) { pendingAuth.delete(chatId); return; }
+          const valid = await bcrypt.compare(text, webUser.passwordHash);
+          if (!valid) {
+            await safeSend(bot, chatId, "❌ Incorrect password. Try again:");
+            return;
+          }
+          await db.update(webUsersTable)
+            .set({ telegramId: authState.telegramId })
+            .where(eq(webUsersTable.id, webUser.id));
+          pendingAuth.delete(chatId);
+          await safeSend(bot, chatId,
+            `✅ *Accounts linked!*\n\n👤 ${escapeMd(webUser.username)} is now connected to your Telegram.\n\nYou can log in to the dashboard with your email and password.`,
+            { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+              [{ text: "🌐 Open Dashboard", url: PLATFORM_URL ?? "https://webforge.replit.app" }],
+              [{ text: "⚡ Start Building", callback_data: "auth_skip" }],
+            ]}}
+          );
+          return;
+        }
+      } catch (err) {
+        logger.error({ err }, "Auth conversation error");
+        pendingAuth.delete(chatId);
+        await safeSend(bot, chatId, "❌ Something went wrong. Try /start again.");
+        return;
+      }
+    }
+
     await handleGeneralMessage(msg).catch(err => logger.error({ err }, "Message handler error"));
   });
 

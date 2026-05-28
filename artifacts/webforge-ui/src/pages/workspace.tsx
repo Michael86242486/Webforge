@@ -125,85 +125,152 @@ function TreeNode({
   );
 }
 
-// ─── Terminal Panel ─────────────────────────────────────────────────────────────
+// ─── Terminal Panel (WebSocket-backed collaborative terminal) ────────────────────
 
-function TerminalPanel({ projectId }: { projectId: string }) {
+function TerminalPanel({ projectId, workDir }: { projectId: string; workDir?: string }) {
   const [lines, setLines] = useState<TerminalLine[]>([
-    { text: "WebForge Terminal — type a command and press Enter", type: "info" },
-    { text: "", type: "output" },
+    { text: "WebForge Terminal — connecting...", type: "info" },
   ]);
   const [input, setInput] = useState("");
-  const [running, setRunning] = useState(false);
+  const [connected, setConnected] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
   const [histIdx, setHistIdx] = useState(-1);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const resolvedWorkDir = workDir ?? `/home/runner/workspace/user-projects/${projectId}`;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [lines]);
 
-  const run = useCallback(async (cmd: string) => {
+  // Build WebSocket URL from current page host
+  useEffect(() => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    // Strip the frontend base path — the API server owns /runtime/ws
+    const apiBase = import.meta.env.VITE_API_URL as string | undefined;
+    let host: string;
+    if (apiBase) {
+      host = apiBase.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    } else {
+      host = window.location.host;
+    }
+    const url = `${proto}//${host}/runtime/ws?projectId=${encodeURIComponent(projectId)}`;
+
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setConnected(true);
+      setLines(l => [...l, { text: "Connected — starting shell session...", type: "info" }]);
+      ws.send(JSON.stringify({ type: "terminal_start", projectId, workDir: resolvedWorkDir }));
+    };
+
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data as string) as { type: string; data?: string };
+        if (msg.type === "terminal_history" && msg.data) {
+          // Replay buffered output for late joiners
+          setLines(() => [
+            { text: "── session replay ──", type: "info" },
+            ...msg.data!.split(/(?<=\n)/).map(t => ({ text: t.replace(/\r?\n$/, ""), type: "output" as const })),
+          ]);
+        } else if ((msg.type === "terminal_output" || msg.type === "terminal_history") && msg.data) {
+          const chunks = msg.data.split(/\r?\n/);
+          setLines(l => [
+            ...l,
+            ...chunks
+              .filter((_, i) => i < chunks.length - 1 || chunks[chunks.length - 1] !== "")
+              .map(t => ({ text: t, type: "output" as const })),
+          ]);
+        } else if (msg.type === "terminal_ready") {
+          setLines(l => [...l, { text: "Shell ready. Type commands below.", type: "info" }]);
+          inputRef.current?.focus();
+        }
+      } catch {}
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      setLines(l => [...l, { text: "── terminal disconnected ──", type: "info" }]);
+    };
+
+    ws.onerror = () => {
+      setLines(l => [...l, { text: "WebSocket error — check server logs.", type: "error" }]);
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [projectId, resolvedWorkDir]);
+
+  const sendInput = useCallback((cmd: string) => {
     if (!cmd.trim()) return;
     setLines(l => [...l, { text: `$ ${cmd}`, type: "input" }]);
     setHistory(h => [cmd, ...h.slice(0, 49)]);
     setHistIdx(-1);
     setInput("");
-    setRunning(true);
-    try {
-      const r = await fetch(apiUrl(`/ide/${projectId}/run`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: cmd }),
-      });
-      const data = await r.json();
-      if (data.stdout) {
-        data.stdout.split("\n").forEach((line: string) => {
-          setLines(l => [...l, { text: line, type: "output" }]);
-        });
-      }
-      if (data.stderr) {
-        data.stderr.split("\n").forEach((line: string) => {
-          setLines(l => [...l, { text: line, type: "error" }]);
-        });
-      }
-    } catch (err: any) {
-      setLines(l => [...l, { text: `Error: ${err.message}`, type: "error" }]);
-    } finally {
-      setRunning(false);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "terminal_input",
+        projectId,
+        workDir: resolvedWorkDir,
+        data: cmd + "\n",
+      }));
+    } else {
+      setLines(l => [...l, { text: "Not connected — reconnecting...", type: "error" }]);
     }
-  }, [projectId]);
+  }, [projectId, resolvedWorkDir]);
+
+  const reconnect = useCallback(() => {
+    wsRef.current?.close();
+    setLines([{ text: "Reconnecting...", type: "info" }]);
+    // Effect cleanup + re-run on projectId change isn't triggered; force by closing
+    // The useEffect cleanup will run and a new WS will be opened on next render.
+    // For a manual reconnect we nudge by closing — the component will re-open.
+  }, []);
 
   return (
     <div className="flex flex-col h-full font-mono text-xs bg-[#0d1117]">
+      {/* Connection status bar */}
+      <div className={cn(
+        "flex items-center gap-2 px-3 py-1 border-b border-white/10 text-[10px]",
+        connected ? "text-green-400" : "text-yellow-500"
+      )}>
+        <span className={cn("w-1.5 h-1.5 rounded-full", connected ? "bg-green-400" : "bg-yellow-500")} />
+        {connected ? "Live — shared terminal" : "Connecting..."}
+        <button
+          onClick={reconnect}
+          className="ml-auto text-gray-500 hover:text-gray-300 transition-colors"
+          title="Reconnect"
+        >↺</button>
+      </div>
+
       <div className="flex-1 overflow-y-auto p-3 space-y-0.5">
         {lines.map((line, i) => (
           <div key={i} className={cn(
             "whitespace-pre-wrap break-all leading-5",
             line.type === "error" ? "text-red-400" :
             line.type === "input" ? "text-green-400" :
-            line.type === "info" ? "text-blue-400" :
+            line.type === "info" ? "text-blue-400/70" :
             "text-gray-300"
           )}>
             {line.text}
           </div>
         ))}
-        {running && (
-          <div className="flex items-center gap-2 text-yellow-400">
-            <Loader2 className="w-3 h-3 animate-spin" />
-            <span>Running...</span>
-          </div>
-        )}
         <div ref={bottomRef} />
       </div>
+
       <div className="border-t border-white/10 flex items-center gap-2 px-3 py-2">
         <span className="text-green-400 shrink-0">$</span>
         <input
+          ref={inputRef}
           className="flex-1 bg-transparent outline-none text-gray-200 placeholder-gray-600"
-          placeholder="Enter command..."
+          placeholder={connected ? "Enter command..." : "Connecting..."}
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => {
-            if (e.key === "Enter") run(input);
+            if (e.key === "Enter") sendInput(input);
             if (e.key === "ArrowUp") {
               const idx = Math.min(histIdx + 1, history.length - 1);
               setHistIdx(idx);
@@ -215,10 +282,10 @@ function TerminalPanel({ projectId }: { projectId: string }) {
               setInput(idx === -1 ? "" : history[idx]);
             }
           }}
-          disabled={running}
+          disabled={!connected}
           autoFocus
         />
-        {running && <Loader2 className="w-3.5 h-3.5 text-yellow-400 animate-spin shrink-0" />}
+        {!connected && <Loader2 className="w-3.5 h-3.5 text-yellow-400 animate-spin shrink-0" />}
       </div>
     </div>
   );
@@ -404,6 +471,7 @@ export default function Workspace() {
   // File tree
   const [tree, setTree] = useState<FileEntry[]>([]);
   const [treeLoading, setTreeLoading] = useState(true);
+  const [projectWorkDir, setProjectWorkDir] = useState<string | undefined>(undefined);
 
   // Tabs
   const [tabs, setTabs] = useState<OpenTab[]>([]);
@@ -440,6 +508,7 @@ export default function Workspace() {
       if (r.ok) {
         const data = await r.json();
         setTree(data.tree ?? []);
+        if (data.workDir) setProjectWorkDir(data.workDir);
       }
     } catch {}
     setTreeLoading(false);
@@ -824,7 +893,7 @@ export default function Workspace() {
                 }}
               />
               <div className="h-[calc(100%-4px)]">
-                {bottomPanel === "terminal" && <TerminalPanel projectId={projectId} />}
+                {bottomPanel === "terminal" && <TerminalPanel projectId={projectId} workDir={projectWorkDir} />}
                 {bottomPanel === "agent" && (
                   <AgentPanel projectId={projectId} onFilesChanged={loadTree} />
                 )}
