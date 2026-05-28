@@ -1,167 +1,261 @@
-= new Audio();
-let currentTrack = null;
-let isPlaying = false;
-let progressInterval = null;
+const AudioPlayer = (function() {
+    // Private variables
+    let audio = null;
+    let waveformCanvas = null;
+    let waveformCtx = null;
+    let isPlaying = false;
+    let currentTrack = null;
+    let animationId = null;
+    let audioContext = null;
+    let analyser = null;
+    let dataArray = null;
+    let source = null;
 
-function initAudioPlayer() {
-  audio.volume = 0.7;
-  audio.addEventListener('ended', handleTrackEnd);
-  audio.addEventListener('timeupdate', updateProgress);
-  audio.addEventListener('loadedmetadata', updateDuration);
-}
+    // DOM Elements
+    let playPauseBtn = null;
+    let progressBar = null;
+    let progressContainer = null;
+    let timeDisplay = null;
+    let volumeSlider = null;
+    let trackTitle = null;
+    let trackArtist = null;
+    let waveformContainer = null;
 
-function loadTrack(track) {
-  if (currentTrack === track) return;
-  audio.src = track.previewUrl;
-  currentTrack = track;
-  isPlaying = false;
-  clearInterval(progressInterval);
-  updatePlayerUI();
-}
+    // Colors
+    const neonPink = '#ff2a6d';
+    const neonBlue = '#05d9e8';
+    const neonPurple = '#d300c5';
+    const darkBg = '#0d0221';
+    const glassBg = 'rgba(13, 2, 33, 0.6)';
+    const glassBorder = 'rgba(5, 217, 232, 0.3)';
 
-function togglePlay() {
-  if (!currentTrack) return;
-  if (isPlaying) {
-    audio.pause();
-  } else {
-    audio.play().catch(e => console.error('Playback failed:', e));
-  }
-  isPlaying = !isPlaying;
-  updatePlayerUI();
-}
+    // Initialize the audio player
+    function init() {
+        _setupDOM();
+        _setupAudioContext();
+        _bindEvents();
+        _renderWaveformPlaceholder();
+    }
 
-function handleTrackEnd() {
-  isPlaying = false;
-  updatePlayerUI();
-  clearInterval(progressInterval);
-}
+    // Setup DOM elements
+    function _setupDOM() {
+        playPauseBtn = document.querySelector('.audio-player .play-pause-btn');
+        progressBar = document.querySelector('.audio-player .progress-bar');
+        progressContainer = document.querySelector('.audio-player .progress-container');
+        timeDisplay = document.querySelector('.audio-player .time-display');
+        volumeSlider = document.querySelector('.audio-player .volume-slider');
+        trackTitle = document.querySelector('.audio-player .track-title');
+        trackArtist = document.querySelector('.audio-player .track-artist');
+        waveformContainer = document.querySelector('.audio-player .waveform-container');
+        waveformCanvas = document.createElement('canvas');
+        waveformContainer.appendChild(waveformCanvas);
+        waveformCtx = waveformCanvas.getContext('2d');
+    }
 
-function updateProgress() {
-  if (!currentTrack) return;
-  const progressBar = document.getElementById('progress-bar');
-  const progressFill = document.getElementById('progress-fill');
-  const currentTimeEl = document.getElementById('current-time');
-  if (progressBar && progressFill && currentTimeEl) {
-    const percent = (audio.currentTime / audio.duration) * 100;
-    progressFill.style.width = `${percent}%`;
-    currentTimeEl.textContent = formatTime(audio.currentTime);
-  }
-}
+    // Setup audio context
+    function _setupAudioContext() {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+    }
 
-function updateDuration() {
-  const durationEl = document.getElementById('duration');
-  if (durationEl) {
-    durationEl.textContent = formatTime(audio.duration);
-  }
-}
+    // Bind event listeners
+    function _bindEvents() {
+        playPauseBtn.addEventListener('click', _togglePlayPause);
+        progressContainer.addEventListener('click', _seek);
+        volumeSlider.addEventListener('input', _setVolume);
+        audio = new Audio();
+        audio.addEventListener('ended', _onTrackEnded);
+        audio.addEventListener('loadedmetadata', _onMetadataLoaded);
+        audio.addEventListener('timeupdate', _updateProgress);
+        audio.addEventListener('error', _onError);
+    }
 
-function formatTime(seconds) {
-  const minutes = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return `${minutes}:${secs < 10 ? '0' : ''}${secs}`;
-}
+    // Toggle play/pause
+    function _togglePlayPause() {
+        if (!currentTrack) return;
 
-function setProgress(e) {
-  if (!currentTrack || !audio.duration) return;
-  const progressBar = document.getElementById('progress-bar');
-  const rect = progressBar.getBoundingClientRect();
-  const pos = (e.clientX - rect.left) / rect.width;
-  audio.currentTime = pos * audio.duration;
-  updateProgress();
-}
+        if (isPlaying) {
+            audio.pause();
+            _disconnectAudioNodes();
+        } else {
+            if (audio.src !== currentTrack) {
+                audio.src = currentTrack;
+            }
+            audio.play().then(() => {
+                _connectAudioNodes();
+            }).catch(err => {
+                console.error('Playback failed:', err);
+            });
+        }
+        isPlaying = !isPlaying;
+        _updatePlayPauseIcon();
+    }
 
-function setVolume(volume) {
-  audio.volume = volume;
-  const volumeSlider = document.getElementById('volume-slider');
-  if (volumeSlider) {
-    volumeSlider.value = volume;
-  }
-  const volumeIcon = document.getElementById('volume-icon');
-  if (volumeIcon) {
-    volumeIcon.textContent = volume > 0.5 ? '🔊' : volume > 0 ? '🔈' : '🔇';
-  }
-}
+    // Connect audio nodes for visualization
+    function _connectAudioNodes() {
+        source = audioContext.createMediaElementSource(audio);
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+        _startVisualization();
+    }
 
-function updatePlayerUI() {
-  const playBtn = document.getElementById('play-btn');
-  const trackTitle = document.getElementById('track-title');
-  const trackArtist = document.getElementById('track-artist');
-  const trackImage = document.getElementById('track-image');
+    // Disconnect audio nodes
+    function _disconnectAudioNodes() {
+        if (source) {
+            source.disconnect();
+            source = null;
+        }
+        if (animationId) {
+            cancelAnimationFrame(animationId);
+            animationId = null;
+        }
+    }
 
-  if (playBtn) {
-    playBtn.textContent = isPlaying ? '⏸' : '▶';
-    playBtn.style.color = isPlaying ? '#ff2a6d' : '#00f5d4';
-  }
-  if (trackTitle && currentTrack) trackTitle.textContent = currentTrack.title;
-  if (trackArtist && currentTrack) trackArtist.textContent = currentTrack.artist;
-  if (trackImage && currentTrack) trackImage.src = currentTrack.artworkUrl;
+    // Start waveform visualization
+    function _startVisualization() {
+        function draw() {
+            animationId = requestAnimationFrame(draw);
+            analyser.getByteFrequencyData(dataArray);
+            _drawWaveform();
+        }
+        draw();
+    }
 
-  if (isPlaying && !progressInterval) {
-    progressInterval = setInterval(updateProgress, 1000);
-  } else if (!isPlaying && progressInterval) {
-    clearInterval(progressInterval);
-    progressInterval = null;
-  }
-}
+    // Draw waveform
+    function _drawWaveform() {
+        const width = waveformCanvas.width;
+        const height = waveformCanvas.height;
+        waveformCtx.clearRect(0, 0, width, height);
 
-function bindControls() {
-  const playBtn = document.getElementById('play-btn');
-  const prevBtn = document.getElementById('prev-btn');
-  const nextBtn = document.getElementById('next-btn');
-  const progressBar = document.getElementById('progress-bar');
-  const volumeSlider = document.getElementById('volume-slider');
+        const barWidth = (width / dataArray.length) * 2.5;
+        let x = 0;
 
-  if (playBtn) playBtn.addEventListener('click', togglePlay);
-  if (prevBtn) prevBtn.addEventListener('click', () => console.log('Previous track'));
-  if (nextBtn) nextBtn.addEventListener('click', () => console.log('Next track'));
-  if (progressBar) progressBar.addEventListener('click', setProgress);
-  if (volumeSlider) volumeSlider.addEventListener('input', (e) => setVolume(parseFloat(e.target.value)));
-}
+        for (let i = 0; i < dataArray.length; i++) {
+            const barHeight = (dataArray[i] / 255) * height;
+            const hue = i / dataArray.length * 360;
+            waveformCtx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+            waveformCtx.fillRect(x, height - barHeight, barWidth, barHeight);
+            x += barWidth + 1;
+        }
+    }
 
-function attachToDOM() {
-  const container = document.getElementById('audio-player-container');
-  if (!container) return;
+    // Draw placeholder waveform
+    function _renderWaveformPlaceholder() {
+        const width = waveformContainer.clientWidth;
+        const height = waveformContainer.clientHeight;
+        waveformCanvas.width = width;
+        waveformCanvas.height = height;
+        waveformCtx.fillStyle = glassBorder;
+        waveformCtx.fillRect(0, 0, width, height);
+    }
 
-  container.innerHTML = `
-    <div class="audio-player">
-      <div class="track-info">
-        <img id="track-image" src="../assets/images/logo.svg" alt="Track Artwork" class="track-image">
-        <div class="track-details">
-          <h3 id="track-title" class="track-title">Select a track</h3>
-          <p id="track-artist" class="track-artist">VibeForge</p>
-        </div>
-      </div>
-      <div class="player-controls">
-        <button id="prev-btn" class="control-btn" title="Previous">⏮</button>
-        <button id="play-btn" class="control-btn play-btn" title="Play/Pause">▶</button>
-        <button id="next-btn" class="control-btn" title="Next">⏭</button>
-      </div>
-      <div class="progress-container">
-        <span id="current-time" class="time">0:00</span>
-        <div id="progress-bar" class="progress-bar">
-          <div id="progress-fill" class="progress-fill"></div>
-        </div>
-        <span id="duration" class="time">0:00</span>
-      </div>
-      <div class="volume-control">
-        <span id="volume-icon" class="volume-icon">🔊</span>
-        <input type="range" id="volume-slider" class="volume-slider" min="0" max="1" step="0.01" value="0.7">
-      </div>
-    </div>
-  `;
+    // Update play/pause icon
+    function _updatePlayPauseIcon() {
+        const icon = playPauseBtn.querySelector('i');
+        if (isPlaying) {
+            icon.className = 'fas fa-pause';
+            playPauseBtn.style.color = neonPink;
+            playPauseBtn.style.boxShadow = `0 0 15px ${neonPink}`;
+        } else {
+            icon.className = 'fas fa-play';
+            playPauseBtn.style.color = neonBlue;
+            playPauseBtn.style.boxShadow = `0 0 15px ${neonBlue}`;
+        }
+    }
 
-  bindControls();
-  initAudioPlayer();
-}
+    // Seek in track
+    function _seek(e) {
+        if (!audio.duration) return;
+        const rect = progressContainer.getBoundingClientRect();
+        const pos = (e.clientX - rect.left) / rect.width;
+        audio.currentTime = pos * audio.duration;
+        _updateProgress();
+    }
 
-function setTrack(track) {
-  loadTrack(track);
-}
+    // Set volume
+    function _setVolume() {
+        audio.volume = volumeSlider.value;
+    }
 
-module.exports = {
-  init: attachToDOM,
-  setTrack,
-  togglePlay,
-  setVolume,
-  loadTrack
-};
+    // Update progress bar
+    function _updateProgress() {
+        if (!audio.duration) return;
+        const progress = (audio.currentTime / audio.duration) * 100;
+        progressBar.style.width = `${progress}%`;
+        _updateTimeDisplay();
+    }
+
+    // Update time display
+    function _updateTimeDisplay() {
+        const currentMinutes = Math.floor(audio.currentTime / 60);
+        const currentSeconds = Math.floor(audio.currentTime % 60).toString().padStart(2, '0');
+        const durationMinutes = Math.floor(audio.duration / 60);
+        const durationSeconds = Math.floor(audio.duration % 60).toString().padStart(2, '0');
+        timeDisplay.textContent = `${currentMinutes}:${currentSeconds} / ${durationMinutes}:${durationSeconds}`;
+    }
+
+    // Handle track ended
+    function _onTrackEnded() {
+        isPlaying = false;
+        _updatePlayPauseIcon();
+        _disconnectAudioNodes();
+    }
+
+    // Handle metadata loaded
+    function _onMetadataLoaded() {
+        _updateTimeDisplay();
+        _resizeWaveform();
+    }
+
+    // Handle error
+    function _onError(err) {
+        console.error('Audio error:', err);
+        isPlaying = false;
+        _updatePlayPauseIcon();
+        _disconnectAudioNodes();
+    }
+
+    // Resize waveform canvas
+    function _resizeWaveform() {
+        const width = waveformContainer.clientWidth;
+        const height = waveformContainer.clientHeight;
+        waveformCanvas.width = width;
+        waveformCanvas.height = height;
+    }
+
+    // Load track
+    function loadTrack(track) {
+        if (!track || !track.src) return;
+
+        currentTrack = track.src;
+        trackTitle.textContent = track.title || 'Unknown Track';
+        trackArtist.textContent = track.artist || 'Unknown Artist';
+        audio.src = track.src;
+        audio.load();
+        isPlaying = false;
+        _updatePlayPauseIcon();
+        _resizeWaveform();
+    }
+
+    // Public API
+    return {
+        init,
+        loadTrack,
+        play: () => { if (currentTrack) _togglePlayPause(); },
+        pause: () => { if (isPlaying) _togglePlayPause(); },
+        getCurrentTrack: () => currentTrack,
+        getIsPlaying: () => isPlaying,
+        setVolume: (volume) => { volumeSlider.value = volume; audio.volume = volume; },
+        resize: _resizeWaveform
+    };
+})();
+
+// Initialize on DOM load
+document.addEventListener('DOMContentLoaded', () => {
+    AudioPlayer.init();
+    window.addEventListener('resize', AudioPlayer.resize);
+});
+
+module.exports = AudioPlayer;

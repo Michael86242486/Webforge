@@ -1,198 +1,110 @@
-// public/app.js
 const api = require('./utils/api');
-const audioPlayer = require('./js/audioPlayer');
-const cart = require('./js/cart');
+const AudioPlayer = require('./js/audioPlayer');
+const Cart = require('./js/cart');
 const githubSync = require('./js/githubSync');
 
-// DOM Elements
-const trackGrid = document.getElementById('track-grid');
-const audioPlayerBar = document.getElementById('audio-player-bar');
-const cartButton = document.getElementById('cart-button');
-const cartModal = document.getElementById('cart-modal');
-const closeCartModal = document.getElementById('close-cart-modal');
-const checkoutButton = document.getElementById('checkout-button');
-const githubSyncButton = document.getElementById('github-sync-button');
-const syncStatus = document.getElementById('sync-status');
-
-// State
-let tracks = [];
-let currentTrack = null;
-let isPlaying = false;
-
-// Initialize App
 document.addEventListener('DOMContentLoaded', () => {
-    loadTracks();
-    setupEventListeners();
-    audioPlayer.init();
-    cart.init();
-    githubSync.init();
-});
+    const trackGrid = document.getElementById('track-grid');
+    const audioPlayer = new AudioPlayer();
+    const cart = new Cart();
+    const syncButton = document.getElementById('github-sync-btn');
 
-// Load Tracks from API
-function loadTracks() {
-    api.fetchTracks()
-        .then(data => {
-            tracks = data;
-            renderTrackGrid();
-        })
-        .catch(error => {
-            console.error('Failed to load tracks:', error);
-            showSyncStatus('Failed to load tracks. Retrying...', 'error');
-            setTimeout(loadTracks, 5000);
-        });
-}
+    // Initialize UI
+    initTrackGrid();
+    initEventListeners();
 
-// Render Track Grid
-function renderTrackGrid() {
-    trackGrid.innerHTML = '';
-    tracks.forEach(track => {
-        const trackCard = document.createElement('div');
-        trackCard.className = 'track-card';
-        trackCard.innerHTML = `
-            <div class="track-cover" style="background: linear-gradient(135deg, ${track.color1 || '#00f5d4'}, ${track.color2 || '#ff2a6d'});">
-                <img src="${track.cover || 'assets/images/default-cover.png'}" alt="${track.title}" />
-                <div class="play-overlay">
-                    <button class="play-button" data-id="${track.id}">
-                        <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
-                            <path d="M8 5v14l11-7z"/>
-                        </svg>
-                    </button>
+    function initTrackGrid() {
+        // Simulate fetching tracks from API
+        const mockTracks = [
+            { id: 1, title: 'Neon Dreams', artist: 'VibeForge', duration: '3:45', price: 12.99, audio: 'assets/audio/placeholder.mp3', cover: 'assets/images/neon-dreams.jpg' },
+            { id: 2, title: 'Retro Wave', artist: 'VibeForge', duration: '4:20', price: 14.99, audio: 'assets/audio/placeholder.mp3', cover: 'assets/images/retro-wave.jpg' },
+            { id: 3, title: 'Synth Horizon', artist: 'VibeForge', duration: '3:10', price: 10.99, audio: 'assets/audio/placeholder.mp3', cover: 'assets/images/synth-horizon.jpg' },
+            { id: 4, title: 'Cyber Pulse', artist: 'VibeForge', duration: '2:55', price: 9.99, audio: 'assets/audio/placeholder.mp3', cover: 'assets/images/cyber-pulse.jpg' },
+            { id: 5, title: 'Electric Echo', artist: 'VibeForge', duration: '3:30', price: 11.99, audio: 'assets/audio/placeholder.mp3', cover: 'assets/images/electric-echo.jpg' },
+            { id: 6, title: 'Glitch Paradise', artist: 'VibeForge', duration: '4:05', price: 13.99, audio: 'assets/audio/placeholder.mp3', cover: 'assets/images/glitch-paradise.jpg' }
+        ];
+
+        mockTracks.forEach(track => {
+            const trackCard = document.createElement('div');
+            trackCard.className = 'track-card glassmorphism';
+            trackCard.innerHTML = `
+                <img src="${track.cover}" alt="${track.title}" class="track-cover" onerror="this.src='assets/images/logo.svg'">
+                <div class="track-info">
+                    <h3 class="neon-text">${track.title}</h3>
+                    <p class="neon-subtext">${track.artist} • ${track.duration}</p>
+                    <p class="neon-price">$${track.price.toFixed(2)}</p>
                 </div>
-            </div>
-            <div class="track-info">
-                <h3>${track.title}</h3>
-                <p>${track.artist || 'VibeForge'}</p>
-                <div class="track-meta">
-                    <span class="duration">${track.duration || '3:30'}</span>
-                    <span class="price">$${track.price || '4.99'}</span>
+                <div class="track-actions">
+                    <button class="btn-neon play-btn" data-audio="${track.audio}" data-title="${track.title}">▶</button>
+                    <button class="btn-neon cart-btn" data-id="${track.id}" data-title="${track.title}" data-price="${track.price}">+</button>
                 </div>
-            </div>
-            <button class="add-to-cart" data-id="${track.id}">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
-                    <path d="M3 3h2l.4 2M7 13h10l4-8H5.4m0 0L7 13m0 0l-1.5 6M7 13l-1.5 6m0 0h9"/>
-                </svg>
-                Add to Cart
-            </button>
-        `;
-        trackGrid.appendChild(trackCard);
-    });
-
-    // Attach event listeners to dynamically created elements
-    document.querySelectorAll('.play-button').forEach(button => {
-        button.addEventListener('click', (e) => {
-            const trackId = e.target.closest('.play-button').dataset.id;
-            playTrack(trackId);
+            `;
+            trackGrid.appendChild(trackCard);
         });
-    });
 
-    document.querySelectorAll('.add-to-cart').forEach(button => {
-        button.addEventListener('click', (e) => {
-            const trackId = e.target.closest('.add-to-cart').dataset.id;
-            const track = tracks.find(t => t.id === trackId);
-            cart.addItem(track);
-            showCartModal();
+        // Attach event listeners to dynamically created buttons
+        document.querySelectorAll('.play-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const audioSrc = e.target.getAttribute('data-audio');
+                const title = e.target.getAttribute('data-title');
+                audioPlayer.loadAndPlay(audioSrc, title);
+            });
         });
-    });
-}
 
-// Play Track
-function playTrack(trackId) {
-    const track = tracks.find(t => t.id === trackId);
-    if (!track) return;
+        document.querySelectorAll('.cart-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const id = e.target.getAttribute('data-id');
+                const title = e.target.getAttribute('data-title');
+                const price = parseFloat(e.target.getAttribute('data-price'));
+                cart.addItem({ id, title, price });
+            });
+        });
+    }
 
-    currentTrack = track;
-    isPlaying = true;
-    audioPlayer.loadTrack(track);
-    audioPlayer.play();
-    updatePlayerBar();
-}
+    function initEventListeners() {
+        // Audio player controls
+        document.getElementById('play-pause-btn').addEventListener('click', () => audioPlayer.togglePlay());
+        document.getElementById('prev-btn').addEventListener('click', () => audioPlayer.prev());
+        document.getElementById('next-btn').addEventListener('click', () => audioPlayer.next());
+        document.getElementById('volume-slider').addEventListener('input', (e) => audioPlayer.setVolume(e.target.value));
 
-// Update Player Bar
-function updatePlayerBar() {
-    if (!currentTrack) return;
-    const playerTitle = audioPlayerBar.querySelector('.player-title');
-    const playerArtist = audioPlayerBar.querySelector('.player-artist');
-    const playerCover = audioPlayerBar.querySelector('.player-cover');
+        // Cart modal
+        document.getElementById('cart-btn').addEventListener('click', () => cart.openModal());
+        document.getElementById('close-cart-modal').addEventListener('click', () => cart.closeModal());
+        document.getElementById('checkout-btn').addEventListener('click', () => cart.checkout());
 
-    playerTitle.textContent = currentTrack.title;
-    playerArtist.textContent = currentTrack.artist || 'VibeForge';
-    playerCover.style.background = `linear-gradient(135deg, ${currentTrack.color1 || '#00f5d4'}, ${currentTrack.color2 || '#ff2a6d'})`;
-    playerCover.innerHTML = `<img src="${currentTrack.cover || 'assets/images/default-cover.png'}" alt="${currentTrack.title}" />`;
-}
-
-// Setup Event Listeners
-function setupEventListeners() {
-    // Cart Modal
-    cartButton.addEventListener('click', showCartModal);
-    closeCartModal.addEventListener('click', hideCartModal);
-    checkoutButton.addEventListener('click', () => {
-        cart.checkout();
-        hideCartModal();
-    });
-
-    // GitHub Sync
-    githubSyncButton.addEventListener('click', () => {
-        githubSync.sync()
-            .then(() => showSyncStatus('Sync successful!', 'success'))
-            .catch(() => showSyncStatus('Sync failed. Retrying...', 'error'));
-    });
-
-    // Audio Player Controls
-    audioPlayerBar.querySelector('.player-play').addEventListener('click', () => {
-        if (isPlaying) {
-            audioPlayer.pause();
-            isPlaying = false;
-        } else {
-            if (currentTrack) {
-                audioPlayer.play();
-                isPlaying = true;
+        // GitHub sync
+        syncButton.addEventListener('click', async () => {
+            syncButton.disabled = true;
+            syncButton.textContent = 'Syncing...';
+            try {
+                const result = await githubSync.syncWithGitHub();
+                alert(result.message);
+            } catch (error) {
+                alert(`Sync failed: ${error.message}`);
+            } finally {
+                syncButton.disabled = false;
+                syncButton.textContent = 'Sync with GitHub';
             }
+        });
+
+        // Cart inquiry
+        document.getElementById('inquiry-btn').addEventListener('click', async () => {
+            try {
+                const response = await api.postInquiry({ message: 'Cart inquiry from VibeForge' });
+                alert(`Inquiry sent! ID: ${response.inquiryId}`);
+            } catch (error) {
+                alert(`Inquiry failed: ${error.message}`);
+            }
+        });
+    }
+
+    // Global audio player progress bar update
+    setInterval(() => {
+        const progressBar = document.getElementById('progress-bar');
+        if (progressBar && audioPlayer.audio) {
+            const progress = (audioPlayer.audio.currentTime / audioPlayer.audio.duration) * 100;
+            progressBar.style.width = `${progress}%`;
         }
-    });
-
-    audioPlayerBar.querySelector('.player-next').addEventListener('click', () => {
-        // Simple next track logic (cycle through tracks)
-        if (!currentTrack) return;
-        const currentIndex = tracks.findIndex(t => t.id === currentTrack.id);
-        const nextIndex = (currentIndex + 1) % tracks.length;
-        playTrack(tracks[nextIndex].id);
-    });
-
-    audioPlayerBar.querySelector('.player-prev').addEventListener('click', () => {
-        // Simple previous track logic (cycle through tracks)
-        if (!currentTrack) return;
-        const currentIndex = tracks.findIndex(t => t.id === currentTrack.id);
-        const prevIndex = (currentIndex - 1 + tracks.length) % tracks.length;
-        playTrack(tracks[prevIndex].id);
-    });
-}
-
-// Show Cart Modal
-function showCartModal() {
-    cartModal.classList.add('active');
-    cart.render();
-}
-
-// Hide Cart Modal
-function hideCartModal() {
-    cartModal.classList.remove('active');
-}
-
-// Show Sync Status
-function showSyncStatus(message, type) {
-    syncStatus.textContent = message;
-    syncStatus.className = `sync-status ${type}`;
-    setTimeout(() => {
-        if (syncStatus.textContent === message) {
-            syncStatus.textContent = '';
-            syncStatus.className = 'sync-status';
-        }
-    }, 3000);
-}
-
-// Expose public methods for other modules
-module.exports = {
-    playTrack,
-    updatePlayerBar,
-    showSyncStatus
-};
+    }, 100);
+});

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Premium restaurant booking experience with vibrant red accents and glassmorphism design">
+    <meta name="theme-color" content="#0a0a0a">
+    <title>Red | Premium Restaurant Booking</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="assets/fonts/inter.css">
+    <link rel="icon" type="image/svg+xml" href="assets/images/logo.svg">
+</head>
+<body>
+    <div class="particle-background"></div>
+
+    <header class="header">
+        <div class="container">
+            <a href="#" class="logo">
+                <img src="assets/images/logo.svg" alt="Red Restaurant Logo" class="logo-img">
+                <span class="logo-text">Red</span>
+            </a>
+            <nav class="nav">
+                <ul class="nav-list">
+                    <li class="nav-item"><a href="#home" class="nav-link">Home</a></li>
+                    <li class="nav-item"><a href="#menu" class="nav-link">Menu</a></li>
+                    <li class="nav-item"><a href="#reservations" class="nav-link">Reservations</a></li>
+                    <li class="nav-item"><a href="#about" class="nav-link">About</a></li>
+                    <li class="nav-item"><a href="#contact" class="nav-link">Contact</a></li>
+                </ul>
+            </nav>
+            <button class="cta-button">Book Now</button>
+        </div>
+    </header>
+
+    <main>
+        <section id="home" class="hero">
+            <div class="container">
+                <div class="hero-content">
+                    <h1 class="hero-title">Elevate Your Dining Experience</h1>
+                    <p class="hero-subtitle">Discover the art of fine dining with our exclusive menu and ambiance.</p>
+                    <a href="#reservations" class="hero-cta">Make a Reservation</a>
+                </div>
+                <div class="hero-image">
+                    <div class="image-placeholder"></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="menu" class="menu-section">
+            <div class="container">
+                <h2 class="section-title">Our Menu</h2>
+                <div class="menu-grid">
+                    <div class="menu-card glass-card">
+                        <div class="menu-card-image">
+                            <div class="image-placeholder"></div>
+                        </div>
+                        <div class="menu-card-content">
+                            <h3 class="menu-card-title">Starter</h3>
+                            <p class="menu-card-description">Exquisite appetizers to begin your culinary journey.</p>
+                            <span class="menu-card-price">$12.99</span>
+                        </div>
+                    </div>
+                    <div class="menu-card glass-card">
+                        <div class="menu-card-image">
+                            <div class="image-placeholder"></div>
+                        </div>
+                        <div class="menu-card-content">
+                            <h3 class="menu-card-title">Main Course</h3>
+                            <p class="menu-card-description">Signature dishes crafted with passion and precision.</p>
+                            <span class="menu-card-price">$24.99</span>
+                        </div>
+                    </div>
+                    <div class="menu-card glass-card">
+                        <div class="menu-card-image">
+                            <div class="image-placeholder"></div>
+                        </div>
+                        <div class="menu-card-content">
+                            <h3 class="menu-card-title">Dessert</h3>
+                            <p class="menu-card-description">Sweet endings that leave a lasting impression.</p>
+                            <span class="menu-card-price">$9.99</span>
+                        </div>
+                    </div>
+                    <div class="menu-card glass-card">
+                        <div class="menu-card-image">
+                            <div class="image-placeholder"></div>
+                        </div>
+                        <div class="menu-card-content">
+                            <h3 class="menu-card-title">Drinks</h3>
+                            <p class="menu-card-description">Handcrafted cocktails and fine wines to complement your meal.</p>
+                            <span class="menu-card-price">$8.99</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="reservations" class="reservations-section">
+            <div class="container">
+                <h2 class="section-title">Make a Reservation</h2>
+                <form id="booking-form" class="booking-form glass-card">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="name" class="form-label">Full Name</label>
+                            <input type="text" id="name" name="name" class="form-input" placeholder="John Doe" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="email" class="form-label">Email</label>
+                            <input type="email" id="email" name="email" class="form-input" placeholder="john@example.com" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="phone" class="form-label">Phone</label>
+                            <input type="tel" id="phone" name="phone" class="form-input" placeholder="+1234567890" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="date" class="form-label">Date</label>
+                            <input type="date" id="date" name="date" class="form-input" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="time" class="form-label">Time</label>
+                            <input type="time" id="time" name="time" class="form-input" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="guests" class="form-label">Number of Guests</label>
+                            <input type="number" id="guests" name="guests" class="form-input" placeholder="2" min="1" required>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="notes" class="form-label">Special Requests</label>
+                        <textarea id="notes" name="notes" class="form-input form-textarea" placeholder="Any special requests or notes..."></textarea>
+                    </div>
+                    <button type="submit" class="submit-button">Confirm Reservation</button>
+                </form>
+            </div>
+        </section>
+
+        <section id="about" class="about-section">
+            <div class="container">
+                <h2 class="section-title">About Us</h2>
+                <div class="about-content">
+                    <div class="about-text glass-card">
+                        <p>At <strong>Red</strong>, we believe in the power of exceptional dining. Our chef-driven menu features the finest ingredients, sourced locally and prepared with care. Our ambiance is designed to transport you to a world of elegance and comfort, making every meal a memorable experience.</p>
+                        <p>Whether you're celebrating a special occasion or simply enjoying a night out, our team is dedicated to providing you with the best service and culinary excellence.</p>
+                    </div>
+                    <div class="about-image">
+                        <div class="image-placeholder"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="contact" class="contact-section">
+            <div class="container">
+                <h2 class="section-title">Contact Us</h2>
+                <div class="contact-grid">
+                    <div class="contact-card glass-card">
+                        <div class="contact-icon">📍</div>
+                        <h3 class="contact-title">Address</h3>
+                        <p class="contact-text">123 Fine Dining Street,<br>Singapore, 000000</p>
+                    </div>
+                    <div class="contact-card glass-card">
+                        <div class="contact-icon">📞</div>
+                        <h3 class="contact-title">Phone</h3>
+                        <p class="contact-text">+65 1234 5678</p>
+                    </div>
+                    <div class="contact-card glass-card">
+                        <div class="contact-icon">✉️</div>
+                        <h3 class="contact-title">Email</h3>
+                        <p class="contact-text">reservations@red.com</p>
+                    </div>
+                    <div class="contact-card glass-card">
+                        <div class="contact-icon">🕒</div>
+                        <h3 class="contact-title">Hours</h3>
+                        <p class="contact-text">Mon-Fri: 11:00 AM - 11:00 PM<br>Sat-Sun: 10:00 AM - 12:00 AM</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-brand">
+                    <img src="assets/images/logo.svg" alt="Red Restaurant Logo" class="footer-logo">
+                    <span class="footer-brand-text">Red</span>
+                </div>
+                <p class="footer-tagline">Premium Dining, Unforgettable Moments.</p>
+                <div class="footer-social">
+                    <a href="#" class="social-link">Facebook</a>
+                    <a href="#" class="social-link">Instagram</a>
+                    <a href="#" class="social-link">Twitter</a>
+                </div>
+            </div>
+            <div class="footer-legal">
+                <p>&copy; 2026 Red Restaurant. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+
+    <div id="notification" class="notification"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

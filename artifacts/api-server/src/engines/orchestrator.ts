@@ -568,6 +568,8 @@ export interface PlanningResult {
   summary: string;
   colorScheme?: string;
   designSystem?: string;
+  heroStyle?: string;
+  googleFonts?: string;
 }
 
 // ─── Planning JSON Repair Utilities ──────────────────────────────────────────
@@ -661,14 +663,14 @@ RULES:
   let techStack = "Node.js + Express";
   let summary = userPrompt.slice(0, 80);
 
-  const attemptParse = (raw: string): { manifest: FilePlan[]; techStack: string; summary: string; colorScheme?: string; designSystem?: string } | null => {
+  const attemptParse = (raw: string): { manifest: FilePlan[]; techStack: string; summary: string; colorScheme?: string; designSystem?: string; heroStyle?: string; googleFonts?: string } | null => {
     if (!raw || raw.trim().length < 10) return null;
 
     // ① Strip markdown fences if the model disobeyed
     let cleaned = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
 
     // ② Try direct parse first
-    let parsed: { techStack?: string; summary?: string; files?: FilePlan[]; colorScheme?: string; designSystem?: string } | null = null;
+    let parsed: { techStack?: string; summary?: string; files?: FilePlan[]; colorScheme?: string; designSystem?: string; heroStyle?: string; googleFonts?: string } | null = null;
     try {
       const match = cleaned.match(/\{[\s\S]*\}/);
       if (match) parsed = JSON.parse(match[0]);
@@ -698,6 +700,8 @@ RULES:
         summary: parsed.summary ?? summary,
         colorScheme: parsed.colorScheme,
         designSystem: parsed.designSystem,
+        heroStyle: parsed.heroStyle,
+        googleFonts: parsed.googleFonts,
       };
     }
 
@@ -706,29 +710,34 @@ RULES:
     const scanned = extractFilePathsFromLines(raw);
     if (scanned.length > 0) {
       console.log(`[Planning] 📂 Line scanner found ${scanned.length} paths`);
-      return { manifest: scanned, techStack, summary, colorScheme: undefined, designSystem: undefined };
+      return { manifest: scanned, techStack, summary, colorScheme: undefined, designSystem: undefined, heroStyle: undefined, googleFonts: undefined };
     }
 
     return null;
   };
 
   // ── Phase 1: Mistral Creative Architect ───────────────────────────────────
-  const mistralArchitectPrompt = `You are the Creative Architect for a web application. Design the project structure and aesthetic — do NOT write any source code.
+  const mistralArchitectPrompt = `You are the Creative Director and Lead Architect at a world-class digital agency. Your job is to design the project structure AND a stunning visual identity for a web application — do NOT write source code.
 
 User wants to build: "${userPrompt}"
+
+Think about what kind of site this is (restaurant, SaaS, portfolio, e-commerce, etc.) and design a visual identity that would make a professional designer proud. Be specific with hex codes, font names, and CSS effect descriptions.
 
 Return ONLY valid JSON (no markdown fences, no prose, no explanation):
 {
   "techStack": "Node.js + Express",
   "summary": "One sentence describing the app",
-  "colorScheme": "Dark background #0a0e14, primary accent #58a6ff (electric blue), success #3fb950, text #cdd9e5 (light gray), error #f85149 (red)",
-  "designSystem": "Glassmorphism cards with backdrop-filter blur, smooth CSS transitions (0.3s ease), Inter font, bold section headings, gradient CTAs, animated hover states",
+  "colorScheme": "Describe 5+ specific colors with hex codes tailored to this app type. e.g. for a restaurant: Rich black #0a0800, deep crimson #8B0000, warm gold #D4A017, off-white #FAF7F0, muted charcoal #2C2C2C",
+  "designSystem": "Describe the exact visual style in detail: font pairings (e.g. Playfair Display for headings + Lato for body), UI patterns (e.g. full-bleed hero with parallax, card layouts with box-shadow, sticky navigation with blur backdrop), animations (e.g. fade-in-up on scroll, hover scale transforms), and section layouts (hero → features → gallery → testimonials → CTA → footer)",
+  "heroStyle": "Describe the hero section: e.g. Full-viewport hero with dark overlay on a rich gradient background, large serif headline, subtitle, two CTA buttons",
+  "googleFonts": "Two Google Font names to import, e.g. Playfair Display, Lato",
   "files": [
-    { "path": "package.json", "description": "Node.js manifest with start script" },
-    { "path": "src/index.js", "description": "Express server, listens on process.env.PORT" },
-    { "path": "public/index.html", "description": "Main HTML with beautiful dark themed UI" },
-    { "path": "public/style.css", "description": "Production CSS: glassmorphism, animations, responsive grid" },
-    { "path": "public/app.js", "description": "Frontend JavaScript: API calls, dynamic UI updates" }
+    { "path": "package.json", "description": "Node.js manifest with start script and all required npm packages" },
+    { "path": "src/index.js", "description": "Express server, listens on process.env.PORT, serves static files from public/" },
+    { "path": "src/routes/api.js", "description": "REST API routes for core app functionality" },
+    { "path": "public/index.html", "description": "Full multi-section landing page: sticky nav, hero, features, gallery/menu/showcase, about, contact form, footer" },
+    { "path": "public/style.css", "description": "Production CSS: CSS custom properties, Google Fonts, hero section, card grids, animations, responsive breakpoints, professional footer" },
+    { "path": "public/app.js", "description": "Frontend JavaScript: form handling, smooth scroll, fetch API calls, interactive UI elements, scroll animations" }
   ]
 }
 
@@ -737,8 +746,10 @@ RULES:
 - package.json must have: { "scripts": { "start": "node src/index.js" } }
 - Server MUST bind to 0.0.0.0 explicitly: app.listen(PORT, '0.0.0.0', () => { ... })
 - Server must read process.env.PORT
-- Target 8-14 files for a complete, production-quality app
-- Make colorScheme and designSystem specific and beautiful for this particular app type
+- Target 10-16 files for a complete, production-quality app
+- colorScheme MUST include specific hex codes tailored to THIS app (not generic blue/gray defaults)
+- designSystem MUST include specific Google Font names, specific CSS effects, and specific section layout plan
+- ALL HTML files must have rich multi-section layouts — no single-page minimal designs
 - Return ONLY the JSON object — no markdown, no explanation before or after`;
 
   try {
@@ -1037,37 +1048,100 @@ export async function superOrchestratorBuild(
   };
 
   const mistralSystemPrompt =
-    "You are an elite frontend UI engineer specialising in retro-neon web design. " +
-    "Write COMPLETE, visually stunning HTML/CSS/JavaScript — no truncation, no TODOs, no stubs. " +
-    "Use neon accents, glassmorphism cards, smooth animations, and responsive grids. " +
-    "All .js files use CommonJS (require/module.exports). Make it beautiful and production-ready. " +
-    "CRITICAL: Use RELATIVE asset paths (href=\"style.css\" NOT href=\"/style.css\", src=\"app.js\" NOT src=\"/app.js\"). " +
-    "Absolute paths starting with / break when served through a proxy — always use relative paths.";
+    "You are a world-class UI/UX engineer and visual designer at a top digital agency. " +
+    "You build STUNNING, award-winning websites that look like they cost $50,000. " +
+    "Write COMPLETE, production-ready HTML/CSS/JavaScript — absolutely no truncation, no TODOs, no placeholders, no stubs. " +
+    "\n\nHTML STRUCTURE REQUIREMENTS (mandatory for every HTML file):" +
+    "\n- Import Google Fonts via <link> tag in <head> (e.g. Playfair Display + Lato, or Montserrat + Open Sans)" +
+    "\n- Sticky/fixed navigation bar with logo, nav links, and a CTA button — with blur backdrop" +
+    "\n- Full-viewport hero section: gradient or dark-overlay background, large serif/display headline, subheadline, 1-2 CTA buttons" +
+    "\n- Multiple rich content sections (at minimum: hero, features/menu/services, about/gallery, contact form, footer)" +
+    "\n- Professional footer with logo, description, nav links, social icons, copyright" +
+    "\n- Smooth scroll behavior, scroll-triggered fade-in animations using IntersectionObserver" +
+    "\n- Mobile hamburger menu" +
+    "\n\nCSS REQUIREMENTS (mandatory):" +
+    "\n- CSS custom properties (--color-primary, --color-bg, --font-heading, etc.) in :root" +
+    "\n- Google Fonts @import or <link> import" +
+    "\n- Flexbox + CSS Grid layouts (not floats, not tables)" +
+    "\n- Rich hero: min-height: 100vh, background-image with gradient overlay using linear-gradient" +
+    "\n- Card components: border-radius, box-shadow, hover transform scale + shadow transition" +
+    "\n- Keyframe animations: fadeInUp, fadeIn, slideIn for entry animations" +
+    "\n- Sticky nav with backdrop-filter: blur()" +
+    "\n- Responsive breakpoints at 768px and 480px" +
+    "\n- Section padding: at least 80px top/bottom" +
+    "\n- Minimum 300 lines of CSS with real visual richness" +
+    "\n\nCONTENT REQUIREMENTS:" +
+    "\n- Populate with realistic, context-appropriate content (not lorem ipsum)" +
+    "\n- Use SVG icons inline or Unicode symbols for visual interest" +
+    "\n- Include at least 3-4 items in any grid/card section" +
+    "\n\nCRITICAL PATH RULE: Use RELATIVE asset paths ONLY (href=\"style.css\" NOT href=\"/style.css\"). Absolute paths break the proxy.";
 
-  const buildPrompt = (file: FilePlan, pkgCtx?: string, diskContext?: string): string =>
-    `Write the COMPLETE source code for ONE specific file in a web application.\n\n` +
+  const heroStyle = (plan as any).heroStyle ?? "Full-viewport hero with gradient dark overlay, large display headline, subtitle, two CTA buttons with hover effects";
+  const googleFonts = (plan as any).googleFonts ?? "Playfair Display, Lato";
+
+  const buildPrompt = (file: FilePlan, pkgCtx?: string, diskContext?: string): string => {
+    const isHtml = file.path.endsWith(".html");
+    const isCss = file.path.endsWith(".css");
+    const isJs = file.path.endsWith(".js");
+    const isFrontendJs = isCss || isHtml || (isJs && /[/\\](public|client|static|ui)[/\\]/.test(file.path));
+
+    const htmlSpecificRules = isHtml ? `
+HTML-SPECIFIC REQUIREMENTS (mandatory — these make the difference between amateur and professional):
+- Import Google Fonts: <link href="https://fonts.googleapis.com/css2?family=${googleFonts.split(",")[0]?.trim().replace(/ /g,"+")}:wght@400;600;700;900&family=${(googleFonts.split(",")[1] ?? "Lato").trim().replace(/ /g,"+")}:wght@300;400;600&display=swap" rel="stylesheet">
+- HERO SECTION: ${heroStyle}. Use a rich CSS gradient (not a plain flat color) as background.
+- STICKY NAVIGATION: Fixed/sticky nav with backdrop-filter: blur(12px), logo on left, links in center/right, CTA button
+- MINIMUM 5 DISTINCT SECTIONS: hero, at least 2 content sections (features/menu/services/gallery/team), 1 info/about section, contact form section, footer
+- FOOTER: multi-column footer with logo, tagline, nav links, social links, copyright line
+- SCROLL ANIMATIONS: IntersectionObserver-based fade-in-up on .animate-on-scroll elements
+- HAMBURGER MENU: for mobile (<768px)
+- REALISTIC CONTENT: populate with real, context-appropriate text, prices, names — NO "Lorem ipsum", NO "placeholder text"
+- INLINE SVG ICONS or Unicode symbols (✓ ★ ➤ ⭐) for visual interest
+- All asset paths RELATIVE (style.css not /style.css)
+` : "";
+
+    const cssSpecificRules = isCss ? `
+CSS-SPECIFIC REQUIREMENTS (mandatory):
+- :root CSS VARIABLES block at top: --color-bg, --color-primary, --color-secondary, --color-accent, --color-text, --font-heading, --font-body
+- HERO CSS: .hero { min-height: 100vh; background: linear-gradient(...); display: flex; align-items: center; }
+- NAV CSS: position: fixed; backdrop-filter: blur(12px); width: 100%; z-index: 1000
+- CARD CSS: border-radius, box-shadow, transform: scale on hover, transition
+- KEYFRAME ANIMATIONS: @keyframes fadeInUp, @keyframes fadeIn, @keyframes slideInLeft
+- GRID LAYOUTS: CSS Grid for card sections, Flexbox for nav and footer
+- RESPONSIVE: @media (max-width: 768px) and @media (max-width: 480px) breakpoints
+- SECTION SPACING: padding: 100px 0 for desktop sections
+- MINIMUM 300 LINES — full production stylesheet
+` : "";
+
+    return `Write the COMPLETE source code for ONE specific file in a web application.\n\n` +
     `PROJECT: "${projectDescription}"\n` +
     `TECH STACK: ${plan.techStack}\n` +
     `COLOR SCHEME: ${colorScheme}\n` +
     `DESIGN SYSTEM: ${designSystem}\n` +
+    `GOOGLE FONTS: ${googleFonts}\n` +
+    `HERO STYLE: ${heroStyle}\n` +
     (pkgCtx ? `\nPACKAGE.JSON (use ONLY these deps — no new requires):\n${pkgCtx.slice(0, 600)}\n` : "") +
-    (diskContext ? `\nGROUND TRUTH — WHAT ALREADY EXISTS ON DISK (read this before writing):\n${diskContext.slice(0, 800)}\n` : "") +
+    (diskContext ? `\nGROUND TRUTH — WHAT ALREADY EXISTS ON DISK (read this before writing):\n${diskContext.slice(0, 1200)}\n` : "") +
     `\nALL PROJECT FILES (context — do NOT write these):\n${fileIndex}\n\n` +
     `YOUR FILE TO WRITE:\n` +
     `  PATH: ${file.path}\n` +
     `  PURPOSE: ${file.description}\n\n` +
-    `MANDATORY RULES (DEFENSIVE ENGINEERING — NON-NEGOTIABLE):\n` +
-    `- Return ONLY raw file content — zero markdown fences, zero explanation\n` +
-    `- CommonJS ONLY for .js files (require/module.exports) — never use import/export, never use ES modules\n` +
-    `- NEVER require() a package not listed in the PACKAGE.JSON above — only use what's installed\n` +
-    `- Server .js files MUST include: const PORT = process.env.PORT || 3000; and app.listen(PORT, '0.0.0.0')\n` +
-    `- HTML: complete DOCTYPE, beautiful themed UI matching the color scheme above, linked CSS + JS\n` +
-    `- HTML asset paths: RELATIVE only (href="style.css" NOT href="/style.css") — absolute paths break the proxy\n` +
-    `- CSS: minimum 80 lines — gradients, animations, hover states, flex/grid responsive layout\n` +
+    htmlSpecificRules +
+    cssSpecificRules +
+    `MANDATORY RULES (NON-NEGOTIABLE):\n` +
+    `- Return ONLY raw file content — zero markdown fences, zero explanation, zero preamble\n` +
+    `- CommonJS ONLY for .js files (require/module.exports) — never use import/export\n` +
+    `- NEVER require() a package not listed in the PACKAGE.JSON above\n` +
+    `- Server .js files MUST include: const PORT = process.env.PORT || 3000; app.listen(PORT, '0.0.0.0', ...)\n` +
+    `- HTML/CSS: RELATIVE asset paths only (style.css not /style.css) — absolute paths break the proxy\n` +
     `- package.json: "scripts":{"start":"node src/index.js"} and ALL required npm package names\n` +
-    `- NEVER write placeholders, skeleton code, "// fill in later", "// TODO", or truncated blocks\n` +
-    `- Apply the COLOR SCHEME and DESIGN SYSTEM to all visual output — make it beautiful\n` +
-    `- Complex files (JS/HTML/CSS): minimum 60 lines of real, working code`;
+    `- NEVER write placeholders, "// TODO", "fill in later", or truncated blocks — write 100% complete code\n` +
+    `- Apply COLOR SCHEME with exact hex codes — every section must use the design palette\n` +
+    (isHtml ? `- HTML: MINIMUM 200 lines — full multi-section page, not a skeleton\n` : "") +
+    (isCss ? `- CSS: MINIMUM 300 lines — complete production stylesheet\n` : "") +
+    (isFrontendJs && !isHtml && !isCss ? `- Frontend JS: MINIMUM 80 lines — interactive, handles events, fetch API, animations\n` : "") +
+    (!isFrontendJs ? `- Backend JS: MINIMUM 80 lines — complete routes, error handling, middleware\n` : "") +
+    `- QUALITY BAR: imagine this is a $50,000 professional website — every element must look polished`;
+  };
 
   // ── Scan existing disk state for ground truth context (pre-flight) ─────────
   let diskContext: string | undefined;
@@ -1108,14 +1182,20 @@ export async function superOrchestratorBuild(
     }
 
     // Integrity gate: escalate to Dev-X if content is too thin
-    if (!simple && content.trim().length < 80) {
-      console.log(`[SuperOrchestrator] ❌ Integrity fail ${file.path} (${content.length} chars) → Dev-X repair`);
+    const minExpectedLen = file.path.endsWith(".html") ? 2000 : file.path.endsWith(".css") ? 1500 : 300;
+    if (!simple && content.trim().length < minExpectedLen) {
+      console.log(`[SuperOrchestrator] ❌ Integrity fail ${file.path} (${content.length} chars < ${minExpectedLen}) → Dev-X repair`);
       try {
+        const isHtmlRepair = file.path.endsWith(".html");
+        const isCssRepair = file.path.endsWith(".css");
         const repairPrompt =
-          `The file "${file.path}" is critically incomplete. Write COMPLETE production-ready code now.\n\n` +
-          `PURPOSE: ${file.description}\nPROJECT: "${projectDescription}"\nSTACK: ${plan.techStack}\n\n` +
+          `The file "${file.path}" is critically incomplete (only ${content.length} chars — need at minimum ${minExpectedLen}). Write COMPLETE production-ready code now.\n\n` +
+          `PURPOSE: ${file.description}\nPROJECT: "${projectDescription}"\nSTACK: ${plan.techStack}\n` +
+          `COLOR SCHEME: ${colorScheme}\nDESIGN SYSTEM: ${designSystem}\n\n` +
+          (isHtmlRepair ? `HTML MUST INCLUDE: sticky nav, full-viewport hero with gradient background, 5+ sections, contact form, multi-column footer, Google Fonts, IntersectionObserver scroll animations.\n` : "") +
+          (isCssRepair ? `CSS MUST INCLUDE: :root CSS variables, hero min-height:100vh with gradient, fixed nav with backdrop-filter:blur, keyframe animations, CSS Grid/Flexbox, responsive breakpoints. MINIMUM 300 lines.\n` : "") +
           `Return ONLY the file content. No markdown.`;
-        const repair = await routeTaskForModel("dev-x", repairPrompt, grokSystemPrompt, telegramId, 8192);
+        const repair = await routeTaskForModel("dev-x", repairPrompt, isHtmlRepair ? mistralSystemPrompt : grokSystemPrompt, telegramId, 16384);
         const repaired = stripFences(repair.content);
         if (repaired.length > content.length) {
           content = repaired;

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="redGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff4444" />
+      <stop offset="100%" stop-color="#cc0000" />
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <g filter="url(#glow)">
+    <circle cx="100" cy="100" r="90" fill="none" stroke="url(#redGradient)" stroke-width="4" />
+    <path d="M60,100 Q100,60 140,100 Q100,140 60,100" fill="url(#redGradient)" />
+    <text x="100" y="115" font-family="Inter, sans-serif" font-size="32" font-weight="bold" fill="#f0f0f0" text-anchor="middle" dominant-baseline="middle">RED</text>
+    <text x="100" y="145" font-family="Inter, sans-serif" font-size="12" fill="#ff6b6b" text-anchor="middle" dominant-baseline="middle">Restaurant</text>
+  </g>
+
+  <circle cx="100" cy="100" r="80" fill="none" stroke="url(#redGradient)" stroke-width="1" stroke-dasharray="2,2" opacity="0.5" />
+</svg>
